@@ -1,28 +1,23 @@
-import { writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import type { ToolDefinition } from "./registry";
 
-import { tool } from "ai";
-import z from "zod";
-
-export const writeFileToolInputSchema = z.object({
-  filePath: z
-    .string()
-    .describe(
-      "The path to the file to write, e.g. 'output.txt' or './src/config.ts'",
-    ),
-  content: z.string().describe("The content to write to the file."),
-  reason: z.string().describe("The reason for writing the file."),
-});
-
-export const write_file = tool({
-  description:
-    "Write content to a file at the specified path. Creates the file if it doesn't exist, overwrites if it does.",
-  inputSchema: writeFileToolInputSchema,
-  execute: async ({ filePath, content }): Promise<string> => {
-    try {
-      await writeFile(filePath, content, "utf8");
-      return `Successfully wrote to ${filePath}`;
-    } catch (error) {
-      return `Error writing file: ${error}`;
-    }
+export const writeFileTool: ToolDefinition = {
+  name: "write_file",
+  description: "写入内容到指定文件",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "文件路径" },
+      content: { type: "string", description: "要写入的内容" },
+    },
+    required: ["path", "content"],
+    additionalProperties: false,
   },
-});
+  isConcurrencySafe: false, // 写操作不能并行
+  isReadOnly: false, // 写操作不能是只读的
+  execute: async ({ path, content }: { path: string; content: string }) => {
+    writeFileSync(resolve(path), content, "utf-8");
+    return `已写入 ${content.length} 字符到 ${path}`;
+  },
+};

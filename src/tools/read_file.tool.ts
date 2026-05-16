@@ -1,26 +1,20 @@
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import type { ToolDefinition } from "./registry";
 
-import { tool } from "ai";
-import z from "zod";
-
-export const readFileToolInputSchema = z.object({
-  filePath: z
-    .string()
-    .describe(
-      "The path to the file to read, e.g. 'package.json' or './src/index.ts'",
-    ),
-  reason: z.string().describe("The reason for reading the file."),
-});
-
-export const read_file = tool({
-  description: "Read the content of a file at the specified path.",
-  inputSchema: readFileToolInputSchema,
-  execute: async ({ filePath }): Promise<string> => {
-    try {
-      const content = await readFile(filePath, "utf8");
-      return content;
-    } catch (error) {
-      return `Error reading file: ${error}`;
-    }
+export const readFileTool: ToolDefinition = {
+  name: "read_file",
+  description: "读取指定路径的文件内容",
+  parameters: {
+    type: "object",
+    properties: { path: { type: "string", description: "文件路径" } },
+    required: ["path"],
+    additionalProperties: false,
   },
-});
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 500, // 演示用，生产环境通常 50000+
+  execute: async ({ path }: { path: string }) => {
+    return readFileSync(resolve(path), "utf-8");
+  },
+};

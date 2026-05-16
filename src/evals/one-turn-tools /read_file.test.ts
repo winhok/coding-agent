@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import { stepCountIs, ToolLoopAgent } from "ai";
 
 import { claude_opus_4_5_20251101 } from "../../models.ts";
-import { tools } from "../../tools/index.ts";
 import { readFileToolInputSchema } from "../../tools/read_file.tool.ts";
+import { tools } from "../../tools/tools.ts";
 
 const agent = new ToolLoopAgent({
   model: claude_opus_4_5_20251101,

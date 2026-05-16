@@ -5,7 +5,7 @@ import { stepCountIs, ToolLoopAgent } from "ai";
 
 import { claude_opus_4_5_20251101 } from "../../models.ts";
 import { getCurrentTimeToolInputSchema } from "../../tools/get_current_time.tool.ts";
-import { tools } from "../../tools/index.ts";
+import { tools } from "../../tools/tools.ts";
 
 const agent = new ToolLoopAgent({
   model: claude_opus_4_5_20251101,

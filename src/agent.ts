@@ -1,8 +1,61 @@
-import { ToolLoopAgent } from "ai";
-import { claude_opus_4_5_20251101 } from "./models.ts";
-import { tools } from "./tools/index.ts";
+import "dotenv/config";
+import { createInterface } from "node:readline";
+import { createOpenAI } from "@ai-sdk/openai";
+import type { ModelMessage } from "ai";
+import { agentLoop, type BudgetState } from "./agent/loop.ts";
+import { ToolRegistry } from "./tools/registry.ts";
+import { allTools } from "./tools/tools.ts";
 
-export const agent = new ToolLoopAgent({
-  model: claude_opus_4_5_20251101,
-  tools,
+const apiKey = process.env.DASHSCOPE_API_KEY;
+if (!apiKey) {
+  throw new Error("Missing DASHSCOPE_API_KEY environment variable");
+}
+
+const qwen = createOpenAI({
+  baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  apiKey,
 });
+
+const model = qwen.chat("qwen-plus-latest");
+
+const registry = new ToolRegistry();
+registry.register(...allTools);
+
+console.log(`已注册 ${registry.getAll().length} 个工具：`);
+
+for (const tool of registry.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? "可并发" : "串行",
+    tool.isReadOnly ? "只读" : "读写",
+  ].join(",");
+  console.log(`  - ${tool.name}（${flags}）`);
+}
+
+const messages: ModelMessage[] = [];
+// 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
+const budget: BudgetState = { used: 0, limit: 15000 };
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+const SYSTEM = `你是 Coding Agent，一个有工具调用能力的 AI 助手。
+需要查询信息时，主动使用工具，不要编造数据。
+回答要简洁直接。`;
+
+function ask() {
+  rl.question("\nYou:", async (input) => {
+    const trimmed = input.trim();
+    if (!trimmed || trimmed === "exit") {
+      console.log("\nBye!");
+      rl.close();
+      return;
+    }
+
+    messages.push({ role: "user", content: trimmed });
+
+    await agentLoop(model, registry, messages, SYSTEM, budget);
+
+    ask();
+  });
+}
+
+console.log('欢迎使用 Coding Agent！输入 "exit" 退出。');
+ask();

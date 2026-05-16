@@ -7,9 +7,15 @@
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
-    "target": "esnext",
+    "module": "ESNext",
+    "target": "ES2022",
     "types": ["node"],
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
     // For nodejs:
     // "lib": ["esnext"],
     // "types": ["node"],
@@ -33,17 +39,14 @@
     // "noPropertyAccessFromIndexSignature": true,
 
     // Recommended Options
-    "strict": true,
     "jsx": "react-jsx",
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
-    "skipLibCheck": true,
     "rewriteRelativeImportExtensions": true,
     "resolveJsonModule": true,
-    "noEmit": true,
     "composite": true
   },
-  "include": ["src", "evals"]
+  "include": ["src/**/*", "evals"]
 }
