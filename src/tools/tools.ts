@@ -1,6 +1,8 @@
 import { bashTool } from "./bash.tool.ts";
 import { editFileTool } from "./edit_file.tool.ts";
 import { getCurrentTimeTool } from "./get_current_time.tool.ts";
+import { gitDiffTool } from "./git_diff.tool.ts";
+import { gitStatusTool } from "./git_status.tool.ts";
 import { globTool } from "./glob.tool.ts";
 import { grepTool } from "./grep.tool.ts";
 import { listDirectoryTool } from "./list_directory.tool.ts";
@@ -17,4 +19,6 @@ export const allTools: ToolDefinition[] = [
   grepTool,
   globTool,
   editFileTool,
+  gitStatusTool,
+  gitDiffTool,
 ];

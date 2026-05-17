@@ -5,6 +5,8 @@ import { describe, it } from "node:test";
 import { bashTool } from "../../tools/bash.tool.ts";
 import { editFileTool } from "../../tools/edit_file.tool.ts";
 import { getCurrentTimeTool } from "../../tools/get_current_time.tool.ts";
+import { gitDiffTool } from "../../tools/git_diff.tool.ts";
+import { gitStatusTool } from "../../tools/git_status.tool.ts";
 import { globTool } from "../../tools/glob.tool.ts";
 import { grepTool } from "../../tools/grep.tool.ts";
 import { listDirectoryTool } from "../../tools/list_directory.tool.ts";
@@ -28,6 +30,8 @@ describe("tool-unit tools", () => {
         "grep",
         "glob",
         "edit_file",
+        "git_status",
+        "git_diff",
       ]),
     );
   });
@@ -408,7 +412,95 @@ describe("tool-unit tools", () => {
     assert.ok(bashResult.length < 12000, `output was not truncated`);
     assert.match(bashResult, /输出过长，已截断/);
   });
+
+  it("reports git short status for the current working directory", async () => {
+    const dir = makeTempDir();
+    try {
+      await withWorkingDir(dir, async () => {
+        await bashTool.execute({ command: "git init" });
+        writeFileSync(join(dir, "note.txt"), "dirty", "utf-8");
+
+        const statusResult = String(await gitStatusTool.execute({}));
+
+        assert.match(statusResult, /当前变更:/);
+        assert.match(statusResult, /\?\? note\.txt/);
+      });
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("reports unstaged, staged, and path-scoped git diffs", async () => {
+    const dir = makeTempDir();
+    try {
+      await withWorkingDir(dir, async () => {
+        await initGitRepo();
+        writeFileSync(join(dir, "note.txt"), "base\n", "utf-8");
+        writeFileSync(join(dir, "other.txt"), "same\n", "utf-8");
+        await bashTool.execute({ command: "git add note.txt other.txt" });
+        await bashTool.execute({
+          command:
+            "git -c user.email=test@example.com -c user.name=Test commit -m init",
+        });
+
+        writeFileSync(join(dir, "note.txt"), "base\nchanged\n", "utf-8");
+        const unstagedResult = String(await gitDiffTool.execute({}));
+
+        assert.match(unstagedResult, /diff --git a\/note\.txt b\/note\.txt/);
+        assert.match(unstagedResult, /\+changed/);
+
+        await bashTool.execute({ command: "git add note.txt" });
+        const noUnstagedResult = String(await gitDiffTool.execute({}));
+        assert.equal(noUnstagedResult, "没有未暂存的变更。");
+
+        const stagedResult = String(
+          await gitDiffTool.execute({ staged: true }),
+        );
+        assert.match(stagedResult, /diff --git a\/note\.txt b\/note\.txt/);
+        assert.match(stagedResult, /\+changed/);
+
+        const pathResult = String(
+          await gitDiffTool.execute({ staged: true, path: "other.txt" }),
+        );
+        assert.equal(pathResult, "暂存区没有变更。");
+      });
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("truncates long git diff output", async () => {
+    const dir = makeTempDir();
+    try {
+      await withWorkingDir(dir, async () => {
+        await initGitRepo();
+        writeFileSync(join(dir, "long.txt"), "base\n", "utf-8");
+        await bashTool.execute({ command: "git add long.txt" });
+        await bashTool.execute({
+          command:
+            "git -c user.email=test@example.com -c user.name=Test commit -m init",
+        });
+        writeFileSync(
+          join(dir, "long.txt"),
+          `base\n${"x".repeat(12_000)}\n`,
+          "utf-8",
+        );
+
+        const diffResult = String(await gitDiffTool.execute({}));
+
+        assert.ok(diffResult.length < 12_000, "diff output was not truncated");
+        assert.match(diffResult, /diff 输出过长，已截断/);
+        assert.match(diffResult, /共 \d+ 字符/);
+      });
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
 });
+
+async function initGitRepo(): Promise<void> {
+  await bashTool.execute({ command: "git init" });
+}
 
 async function withWorkingDir<T>(
   dir: string,
