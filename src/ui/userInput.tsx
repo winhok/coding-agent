@@ -8,7 +8,7 @@ import {
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
 import { useReducer } from "react";
-import { agentService } from "../services/agent.service.ts";
+import { agent } from "../agent.ts";
 import { boxStyles, theme } from "./theme.ts";
 import { uiStore } from "./ui.store.ts";
 
@@ -28,9 +28,11 @@ export function UserInput(): ReactNode {
 
       uiStore.messages.push(userMessage);
 
-      const result = await agentService.generateStream(
-        await convertToModelMessages(uiStore.messages),
-      );
+      const result = await agent.stream({
+        messages: await convertToModelMessages(uiStore.messages, {
+          tools: agent.tools,
+        }),
+      });
 
       const uiMessageStream = readUIMessageStream({
         stream: result.toUIMessageStream({
