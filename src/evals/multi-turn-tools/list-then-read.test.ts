@@ -5,7 +5,6 @@ import { describe, it } from "node:test";
 
 import { stepCountIs, ToolLoopAgent } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-
 import { ToolRegistry } from "../../tools/registry.ts";
 import { allTools } from "../../tools/tools.ts";
 import {
@@ -14,7 +13,7 @@ import {
   mockTextResponse,
   mockToolCallResponse,
   withMutedConsole,
-} from "../helpers.ts";
+} from "../../verification/helpers.ts";
 
 describe("multi-turn-tools with MockLanguageModelV3", () => {
   it("can list a directory, read a discovered file, and finish", async () => {

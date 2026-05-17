@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export function makeTempDir(prefix = "coding-agent-eval-"): string {
+export function makeTempDir(prefix = "coding-agent-fixture-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 

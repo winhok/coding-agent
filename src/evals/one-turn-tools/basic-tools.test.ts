@@ -5,7 +5,6 @@ import { describe, it } from "node:test";
 
 import { stepCountIs, ToolLoopAgent } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-
 import { ToolRegistry } from "../../tools/registry.ts";
 import { allTools } from "../../tools/tools.ts";
 import {
@@ -13,7 +12,7 @@ import {
   makeTempDir,
   mockToolCallResponse,
   withMutedConsole,
-} from "../helpers.ts";
+} from "../../verification/helpers.ts";
 
 async function runOneTurnToolCall(
   toolName: string,

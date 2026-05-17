@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-
 import { bashTool } from "../../tools/bash.tool.ts";
 import { editFileTool } from "../../tools/edit_file.tool.ts";
 import { getCurrentTimeTool } from "../../tools/get_current_time.tool.ts";
@@ -12,7 +11,7 @@ import { listDirectoryTool } from "../../tools/list_directory.tool.ts";
 import { readFileTool } from "../../tools/read_file.tool.ts";
 import { allTools } from "../../tools/tools.ts";
 import { writeFileTool } from "../../tools/write_file.tool.ts";
-import { cleanupTempDir, makeTempDir } from "../helpers.ts";
+import { cleanupTempDir, makeTempDir } from "../../verification/helpers.ts";
 
 describe("tool-unit tools", () => {
   it("registers every implemented tool", () => {
@@ -93,19 +92,31 @@ describe("tool-unit tools", () => {
     }
   });
 
-  it("searches files with glob and grep while respecting ignored directories", async () => {
+  it("searches files with glob and grep using ripgrep defaults", async () => {
     const dir = makeTempDir();
     try {
       mkdirSync(join(dir, "src"));
       mkdirSync(join(dir, "node_modules"));
+      mkdirSync(join(dir, ".git"));
+      writeFileSync(join(dir, ".gitignore"), "node_modules/\n", "utf-8");
       writeFileSync(
         join(dir, "src", "main.ts"),
         "const marker = 1;\n",
         "utf-8",
       );
       writeFileSync(
+        join(dir, "src", "case.ts"),
+        "const Marker = 2;\n",
+        "utf-8",
+      );
+      writeFileSync(
         join(dir, "node_modules", "hidden.ts"),
-        "const marker = 2;\n",
+        "const marker = 3;\n",
+        "utf-8",
+      );
+      writeFileSync(
+        join(dir, ".git", "config"),
+        "const marker = 4;\n",
         "utf-8",
       );
 
@@ -119,7 +130,36 @@ describe("tool-unit tools", () => {
         await grepTool.execute({ pattern: "marker", path: dir }),
       );
       assert.match(grepResult, /src\/main\.ts:1/);
+      assert.doesNotMatch(grepResult, /src\/case\.ts/);
       assert.doesNotMatch(grepResult, /node_modules/);
+      assert.doesNotMatch(grepResult, /\.git/);
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("limits grep results globally", async () => {
+    const dir = makeTempDir();
+    try {
+      mkdirSync(join(dir, "src"));
+      writeFileSync(
+        join(dir, "src", "one.txt"),
+        "needle one\nneedle two\n",
+        "utf-8",
+      );
+      writeFileSync(
+        join(dir, "src", "two.txt"),
+        "needle three\nneedle four\n",
+        "utf-8",
+      );
+
+      const grepResult = String(
+        await grepTool.execute({ pattern: "needle", path: dir, maxResults: 2 }),
+      );
+
+      const lines = grepResult.split("\n");
+      assert.equal(lines.filter((line) => line.includes("needle")).length, 2);
+      assert.match(grepResult, /仅显示前 2 条/);
     } finally {
       cleanupTempDir(dir);
     }

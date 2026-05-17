@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-
 import {
   type ToolDefinition,
   ToolRegistry,
   truncateResult,
 } from "../../tools/registry.ts";
-import { withMutedConsole } from "../helpers.ts";
+import { withMutedConsole } from "../../verification/helpers.ts";
 
 describe("tool-unit registry", () => {
   it("truncates long tool results while preserving head and tail", () => {
