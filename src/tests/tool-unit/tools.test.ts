@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { bashTool } from "../../tools/bash.tool.ts";
+import { createTodosTool } from "../../tools/create_todos.tool.ts";
 import { editFileTool } from "../../tools/edit_file.tool.ts";
 import { getCurrentTimeTool } from "../../tools/get_current_time.tool.ts";
 import { gitDiffTool } from "../../tools/git_diff.tool.ts";
@@ -11,7 +12,9 @@ import { globTool } from "../../tools/glob.tool.ts";
 import { grepTool } from "../../tools/grep.tool.ts";
 import { listDirectoryTool } from "../../tools/list_directory.tool.ts";
 import { readFileTool } from "../../tools/read_file.tool.ts";
+import { resetTodoManagerForTests } from "../../tools/todo_manager.ts";
 import { allTools } from "../../tools/tools.ts";
+import { updateTodoTool } from "../../tools/update_todo.tool.ts";
 import { writeFileTool } from "../../tools/write_file.tool.ts";
 import { cleanupTempDir, makeTempDir } from "../../verification/helpers.ts";
 
@@ -32,8 +35,62 @@ describe("tool-unit tools", () => {
         "edit_file",
         "git_status",
         "git_diff",
+        "create_todos",
+        "update_todo",
       ]),
     );
+  });
+
+  it("creates and replaces an in-memory todo plan", async () => {
+    resetTodoManagerForTests();
+
+    const createResult = String(
+      await createTodosTool.execute({
+        todos: ["Read current tools", "Add planning tools"],
+      }),
+    );
+
+    assert.match(createResult, /已创建 2 个计划步骤/);
+    assert.match(createResult, /\[pending\] #1 Read current tools/);
+    assert.match(createResult, /\[pending\] #2 Add planning tools/);
+
+    const replaceResult = String(
+      await createTodosTool.execute({ todos: ["Verify tests"] }),
+    );
+
+    assert.match(replaceResult, /已创建 1 个计划步骤/);
+    assert.match(replaceResult, /\[pending\] #1 Verify tests/);
+    assert.doesNotMatch(replaceResult, /Read current tools/);
+  });
+
+  it("updates todo status and rejects invalid updates", async () => {
+    resetTodoManagerForTests();
+    await createTodosTool.execute({
+      todos: ["Write tests", "Implement tools"],
+    });
+
+    const runningResult = String(
+      await updateTodoTool.execute({ id: "1", status: "running" }),
+    );
+    assert.match(runningResult, /步骤 #1 "Write tests" -> running/);
+    assert.match(runningResult, /\[running\] #1 Write tests/);
+    assert.match(runningResult, /\[pending\] #2 Implement tools/);
+
+    const completedResult = String(
+      await updateTodoTool.execute({ id: "1", status: "completed" }),
+    );
+    assert.match(completedResult, /步骤 #1 "Write tests" -> completed/);
+    assert.match(completedResult, /\[completed\] #1 Write tests/);
+
+    const invalidStatusResult = String(
+      await updateTodoTool.execute({ id: "1", status: "blocked" }),
+    );
+    assert.match(invalidStatusResult, /错误：无效状态 "blocked"/);
+
+    const missingResult = String(
+      await updateTodoTool.execute({ id: "99", status: "completed" }),
+    );
+    assert.match(missingResult, /错误：未找到 ID 为 "99" 的步骤/);
   });
 
   it("reads, writes, and lists files deterministically", async () => {
