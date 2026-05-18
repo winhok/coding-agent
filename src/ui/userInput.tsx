@@ -1,5 +1,6 @@
 import { TextInput } from "@inkjs/ui";
 import {
+  type Agent,
   convertToModelMessages,
   createIdGenerator,
   readUIMessageStream,
@@ -8,11 +9,12 @@ import {
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
 import { useReducer } from "react";
-import { agent } from "../agent.ts";
 import { boxStyles, theme } from "./theme.ts";
 import { uiStore } from "./ui.store.ts";
 
-export function UserInput(): ReactNode {
+type UserInputProps = { agent: Agent };
+
+export function UserInput({ agent }: UserInputProps): ReactNode {
   const [key, forceUpdate] = useReducer((p) => p + 1, 0);
 
   async function handleSubmit(value: string) {

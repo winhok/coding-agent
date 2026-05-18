@@ -6,8 +6,8 @@ import {
   hashToolCall,
   recordCall,
   resetHistory,
-} from "../../agent/loop-detection.ts";
-import { calculateDelay, isRetryable } from "../../agent/retry.ts";
+} from "../../src/agent/loop-detection.ts";
+import { calculateDelay, isRetryable } from "../../src/agent/retry.ts";
 
 describe("tool-unit agent control", () => {
   it("hashes tool arguments independent of object key order", () => {

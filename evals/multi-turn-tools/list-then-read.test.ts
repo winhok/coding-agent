@@ -5,22 +5,23 @@ import { describe, it } from "node:test";
 
 import { stepCountIs, ToolLoopAgent } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { ToolRegistry } from "../../tools/registry.ts";
-import { allTools } from "../../tools/tools.ts";
+import { allTools } from "../../src/tools/index.ts";
+import { ToolRegistry } from "../../src/tools/registry.ts";
 import {
   cleanupTempDir,
   makeTempDir,
   mockTextResponse,
   mockToolCallResponse,
   withMutedConsole,
-} from "../../verification/helpers.ts";
+  withWorkingDir,
+} from "../../tests/helpers.ts";
 
 describe("multi-turn-tools with MockLanguageModelV3", () => {
   it("can list a directory, read a discovered file, and finish", async () => {
     const dir = makeTempDir();
     try {
-      const file = join(dir, "target.txt");
-      writeFileSync(file, "multi turn content\n", "utf-8");
+      const file = "target.txt";
+      writeFileSync(join(dir, file), "multi turn content\n", "utf-8");
 
       const registry = new ToolRegistry();
       registry.register(...allTools);
@@ -37,7 +38,7 @@ describe("multi-turn-tools with MockLanguageModelV3", () => {
           doGenerate: async () => {
             callCount++;
             if (callCount === 1) {
-              return mockToolCallResponse("list_directory", { path: dir });
+              return mockToolCallResponse("list_directory", { path: "." });
             }
             if (callCount === 2) {
               return mockToolCallResponse("read_file", { path: file });
@@ -60,8 +61,10 @@ describe("multi-turn-tools with MockLanguageModelV3", () => {
         },
       });
 
-      const result = await withMutedConsole(() =>
-        agent.generate({ prompt: "find and read target.txt" }),
+      const result = await withWorkingDir(dir, () =>
+        withMutedConsole(() =>
+          agent.generate({ prompt: "find and read target.txt" }),
+        ),
       );
 
       assert.equal(callCount, 3);

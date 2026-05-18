@@ -4,9 +4,8 @@ import { describe, it } from "node:test";
 import "dotenv/config";
 import { createOpenAI } from "@ai-sdk/openai";
 import { stepCountIs, ToolLoopAgent } from "ai";
-
-import { ToolRegistry } from "../../tools/registry.ts";
-import { allTools } from "../../tools/tools.ts";
+import { allTools } from "../../src/tools/index.ts";
+import { ToolRegistry } from "../../src/tools/registry.ts";
 
 const runRealModelEvals = process.env.RUN_REAL_MODEL_EVALS === "1";
 

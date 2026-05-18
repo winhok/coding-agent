@@ -3,6 +3,7 @@ import { Box, useInput } from "ink";
 import type { ReactNode } from "react";
 import { useSyncExternalStore } from "react";
 import { useSnapshot } from "valtio";
+import type { CodingAgentRuntime } from "../index.ts";
 import { BoxTitle } from "./boxTitle.tsx";
 import { Messages } from "./message.tsx";
 import { theme } from "./theme.ts";
@@ -30,7 +31,9 @@ const customTheme = extendTheme(defaultTheme, {
   },
 });
 
-export function App(): ReactNode {
+type AppProps = { runtime: CodingAgentRuntime };
+
+export function App({ runtime }: AppProps): ReactNode {
   const rows = useSyncExternalStore(store.subscribe, store.getRows);
   const snap = useSnapshot(uiStore);
 
@@ -45,7 +48,7 @@ export function App(): ReactNode {
         {!snap.approval && (
           <>
             <UserUsage />
-            <UserInput />
+            <UserInput agent={runtime.agent} />
           </>
         )}
       </Box>

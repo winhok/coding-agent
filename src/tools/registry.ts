@@ -10,6 +10,19 @@ export interface ToolDefinition {
   execute: (input: any) => Promise<unknown>;
 }
 
+interface MCPTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface MCPToolClient {
+  connect(): Promise<void>;
+  listTools(): Promise<MCPTool[]>;
+  callTool(name: string, args: Record<string, unknown>): Promise<string>;
+  close(): Promise<void>;
+}
+
 const DEFAULT_MAX_RESULT_CHARS = 3000;
 
 export class ToolRegistry {
@@ -24,6 +37,59 @@ export class ToolRegistry {
     for (const tool of tools) {
       this.tools.set(tool.name, tool);
     }
+  }
+
+  private mcpClients: MCPToolClient[] = [];
+
+  async registerMCPServer(
+    serverName: string,
+    client: MCPToolClient,
+  ): Promise<string[]> {
+    let connected = false;
+    try {
+      await client.connect();
+      connected = true;
+
+      const tools = await client.listTools();
+      const registered: string[] = [];
+
+      for (const tool of tools) {
+        const prefixedName = `mcp__${serverName}__${tool.name}`;
+        if (this.tools.has(prefixedName)) continue;
+
+        const toolClient = client;
+        const originalName = tool.name;
+
+        this.register({
+          name: prefixedName,
+          description: `[MCP:${serverName}] ${tool.description}`,
+          parameters: tool.inputSchema as Record<string, unknown>,
+          isConcurrencySafe: false,
+          isReadOnly: false,
+          maxResultChars: 3000,
+          execute: async (input: Record<string, unknown>) => {
+            return toolClient.callTool(originalName, input);
+          },
+        });
+
+        registered.push(prefixedName);
+      }
+
+      this.mcpClients.push(client);
+      return registered;
+    } catch (error) {
+      if (connected) {
+        await client.close().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async closeAllMCP(): Promise<void> {
+    for (const client of this.mcpClients) {
+      await client.close();
+    }
+    this.mcpClients = [];
   }
 
   get(name: string): ToolDefinition | undefined {

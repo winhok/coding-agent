@@ -2,21 +2,21 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { bashTool } from "../../tools/bash.tool.ts";
-import { createTodosTool } from "../../tools/create_todos.tool.ts";
-import { editFileTool } from "../../tools/edit_file.tool.ts";
-import { getCurrentTimeTool } from "../../tools/get_current_time.tool.ts";
-import { gitDiffTool } from "../../tools/git_diff.tool.ts";
-import { gitStatusTool } from "../../tools/git_status.tool.ts";
-import { globTool } from "../../tools/glob.tool.ts";
-import { grepTool } from "../../tools/grep.tool.ts";
-import { listDirectoryTool } from "../../tools/list_directory.tool.ts";
-import { readFileTool } from "../../tools/read_file.tool.ts";
-import { resetTodoManagerForTests } from "../../tools/todo_manager.ts";
-import { allTools } from "../../tools/tools.ts";
-import { updateTodoTool } from "../../tools/update_todo.tool.ts";
-import { writeFileTool } from "../../tools/write_file.tool.ts";
-import { cleanupTempDir, makeTempDir } from "../../verification/helpers.ts";
+import { bashTool } from "../../src/tools/bash.tool.ts";
+import { createTodosTool } from "../../src/tools/create_todos.tool.ts";
+import { editFileTool } from "../../src/tools/edit_file.tool.ts";
+import { getCurrentTimeTool } from "../../src/tools/get_current_time.tool.ts";
+import { gitDiffTool } from "../../src/tools/git_diff.tool.ts";
+import { gitStatusTool } from "../../src/tools/git_status.tool.ts";
+import { globTool } from "../../src/tools/glob.tool.ts";
+import { grepTool } from "../../src/tools/grep.tool.ts";
+import { allTools } from "../../src/tools/index.ts";
+import { listDirectoryTool } from "../../src/tools/list_directory.tool.ts";
+import { readFileTool } from "../../src/tools/read_file.tool.ts";
+import { resetTodoManagerForTests } from "../../src/tools/todo_manager.ts";
+import { updateTodoTool } from "../../src/tools/update_todo.tool.ts";
+import { writeFileTool } from "../../src/tools/write_file.tool.ts";
+import { cleanupTempDir, makeTempDir } from "../helpers.ts";
 
 describe("tool-unit tools", () => {
   it("registers every implemented tool", () => {

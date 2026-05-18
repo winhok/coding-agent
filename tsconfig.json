@@ -48,5 +48,5 @@
     "resolveJsonModule": true,
     "composite": true
   },
-  "include": ["src/**/*", "evals"]
+  "include": ["src/**/*", "tests/**/*", "evals/**/*"]
 }

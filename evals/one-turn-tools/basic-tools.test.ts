@@ -5,14 +5,15 @@ import { describe, it } from "node:test";
 
 import { stepCountIs, ToolLoopAgent } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { ToolRegistry } from "../../tools/registry.ts";
-import { allTools } from "../../tools/tools.ts";
+import { allTools } from "../../src/tools/index.ts";
+import { ToolRegistry } from "../../src/tools/registry.ts";
 import {
   cleanupTempDir,
   makeTempDir,
   mockToolCallResponse,
   withMutedConsole,
-} from "../../verification/helpers.ts";
+  withWorkingDir,
+} from "../../tests/helpers.ts";
 
 async function runOneTurnToolCall(
   toolName: string,
@@ -35,10 +36,12 @@ describe("one-turn-tools with MockLanguageModelV3", () => {
   it("executes read_file from a mocked tool call", async () => {
     const dir = makeTempDir();
     try {
-      const file = join(dir, "package.json");
-      writeFileSync(file, '{"name":"eval-fixture"}\n', "utf-8");
+      const file = "package.json";
+      writeFileSync(join(dir, file), '{"name":"eval-fixture"}\n', "utf-8");
 
-      const result = await runOneTurnToolCall("read_file", { path: file });
+      const result = await withWorkingDir(dir, () =>
+        runOneTurnToolCall("read_file", { path: file }),
+      );
       assert.equal(result.toolCalls[0]?.toolName, "read_file");
       assert.match(String(result.toolResults[0]?.output), /eval-fixture/);
     } finally {
@@ -49,14 +52,13 @@ describe("one-turn-tools with MockLanguageModelV3", () => {
   it("executes write_file from a mocked tool call", async () => {
     const dir = makeTempDir();
     try {
-      const file = join(dir, "output.txt");
+      const file = "output.txt";
 
-      const result = await runOneTurnToolCall("write_file", {
-        path: file,
-        content: "mock write",
-      });
+      const result = await withWorkingDir(dir, () =>
+        runOneTurnToolCall("write_file", { path: file, content: "mock write" }),
+      );
       assert.equal(result.toolCalls[0]?.toolName, "write_file");
-      assert.equal(readFileSync(file, "utf-8"), "mock write");
+      assert.equal(readFileSync(join(dir, file), "utf-8"), "mock write");
       assert.match(String(result.toolResults[0]?.output), /已写入/);
     } finally {
       cleanupTempDir(dir);
@@ -69,7 +71,9 @@ describe("one-turn-tools with MockLanguageModelV3", () => {
       mkdirSync(join(dir, "src"));
       writeFileSync(join(dir, "README.md"), "# eval\n", "utf-8");
 
-      const result = await runOneTurnToolCall("list_directory", { path: dir });
+      const result = await withWorkingDir(dir, () =>
+        runOneTurnToolCall("list_directory", { path: "." }),
+      );
       assert.equal(result.toolCalls[0]?.toolName, "list_directory");
       assert.match(String(result.toolResults[0]?.output), /README\.md/);
       assert.match(String(result.toolResults[0]?.output), /src/);

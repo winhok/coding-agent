@@ -4,8 +4,8 @@ import {
   type ToolDefinition,
   ToolRegistry,
   truncateResult,
-} from "../../tools/registry.ts";
-import { withMutedConsole } from "../../verification/helpers.ts";
+} from "../../src/tools/registry.ts";
+import { withMutedConsole } from "../helpers.ts";
 
 describe("tool-unit registry", () => {
   it("truncates long tool results while preserving head and tail", () => {
@@ -102,5 +102,49 @@ describe("tool-unit registry", () => {
       assert.equal(await first, "read_a");
       assert.equal(await second, "read_b");
     });
+  });
+
+  it("registers MCP tools conservatively by default", async () => {
+    const registry = new ToolRegistry();
+
+    await registry.registerMCPServer("github", {
+      connect: async () => {},
+      listTools: async () => [
+        {
+          name: "create_issue",
+          description: "Create an issue",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+      callTool: async () => "ok",
+      close: async () => {},
+    });
+
+    const tool = registry.get("mcp__github__create_issue");
+
+    assert.equal(tool?.isReadOnly, false);
+    assert.equal(tool?.isConcurrencySafe, false);
+  });
+
+  it("closes a connected MCP client when tool discovery fails", async () => {
+    const registry = new ToolRegistry();
+    let closed = false;
+
+    await assert.rejects(
+      () =>
+        registry.registerMCPServer("broken", {
+          connect: async () => {},
+          listTools: async () => {
+            throw new Error("list failed");
+          },
+          callTool: async () => "unused",
+          close: async () => {
+            closed = true;
+          },
+        }),
+      /list failed/,
+    );
+
+    assert.equal(closed, true);
   });
 });

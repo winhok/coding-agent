@@ -8,7 +8,7 @@ import { globTool } from "./glob.tool.ts";
 import { grepTool } from "./grep.tool.ts";
 import { listDirectoryTool } from "./list_directory.tool.ts";
 import { readFileTool } from "./read_file.tool.ts";
-import type { ToolDefinition } from "./registry";
+import type { ToolDefinition } from "./registry.ts";
 import { updateTodoTool } from "./update_todo.tool.ts";
 import { writeFileTool } from "./write_file.tool.ts";
 
