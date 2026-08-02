@@ -2,13 +2,9 @@ import { defaultTheme, extendTheme, ThemeProvider } from "@inkjs/ui";
 import { Box, useInput } from "ink";
 import type { ReactNode } from "react";
 import { useSyncExternalStore } from "react";
-import { useSnapshot } from "valtio";
-import type { CodingAgentRuntime } from "../index.ts";
 import { BoxTitle } from "./boxTitle.tsx";
 import { Messages } from "./message.tsx";
 import { theme } from "./theme.ts";
-import { uiStore } from "./ui.store.ts";
-import { UserInput } from "./userInput.tsx";
 import { UserUsage } from "./userUsage.tsx";
 
 const store = {
@@ -31,11 +27,8 @@ const customTheme = extendTheme(defaultTheme, {
   },
 });
 
-type AppProps = { runtime: CodingAgentRuntime };
-
-export function App({ runtime }: AppProps): ReactNode {
+export function App(): ReactNode {
   const rows = useSyncExternalStore(store.subscribe, store.getRows);
-  const snap = useSnapshot(uiStore);
 
   // Keep stdin open to prevent process from exiting
   useInput(() => {});
@@ -45,12 +38,7 @@ export function App({ runtime }: AppProps): ReactNode {
       <Box flexDirection="column" minHeight={rows - 1} gap={1}>
         <BoxTitle />
         <Messages />
-        {!snap.approval && (
-          <>
-            <UserUsage />
-            <UserInput agent={runtime.agent} />
-          </>
-        )}
+        <UserUsage />
       </Box>
     </ThemeProvider>
   );

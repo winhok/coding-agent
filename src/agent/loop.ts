@@ -10,6 +10,7 @@ import { calculateDelay, isRetryable, sleep } from "./retry.js";
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
+const TOKEN_BUDGET = 50000;
 
 export interface BudgetState {
   used: number;
@@ -21,9 +22,9 @@ export async function agentLoop(
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
-  budget: BudgetState,
 ) {
   let step = 0;
+  let totalTokens = 0;
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -34,10 +35,9 @@ export async function agentLoop(
     let fullText = "";
     let shouldBreak = false;
     let lastToolCall: { name: string; input: unknown } | null = null;
-    let stepResponse: Awaited<ReturnType<typeof streamText>["response"]>;
-    let stepUsage: Awaited<ReturnType<typeof streamText>["usage"]>;
+    let stepResponse: any;
+    let stepUsage: any;
 
-    // 步骤级重试：包裹整个 stream 消费过程
     for (let attempt = 1; ; attempt++) {
       try {
         const result = streamText({
@@ -46,8 +46,10 @@ export async function agentLoop(
           tools: registry.toAISDKFormat(),
           messages,
           maxRetries: 0,
+          providerOptions: { openai: { parallelToolCalls: true } },
           onError: () => {},
         });
+
         for await (const part of result.fullStream) {
           switch (part.type) {
             case "text-delta":
@@ -64,7 +66,7 @@ export async function agentLoop(
 
               const detection = detect(part.toolName, part.input);
               if (detection.stuck) {
-                console.log(`${detection.message}`);
+                console.log(`  ${detection.message}`);
                 if (detection.level === "critical") {
                   shouldBreak = true;
                 } else {
@@ -78,8 +80,14 @@ export async function agentLoop(
               break;
             }
 
-            case "tool-result":
-              console.log(`  [结果: ${JSON.stringify(part.output)}]`);
+            case "tool-result": {
+              const output =
+                typeof part.output === "string"
+                  ? part.output
+                  : JSON.stringify(part.output);
+              const preview =
+                output.length > 120 ? output.slice(0, 120) + "..." : output;
+              console.log(`  [结果: ${part.toolName}] ${preview}`);
               if (lastToolCall) {
                 recordResult(
                   lastToolCall.name,
@@ -88,6 +96,7 @@ export async function agentLoop(
                 );
               }
               break;
+            }
           }
         }
 
@@ -98,7 +107,7 @@ export async function agentLoop(
         if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
         const delay = calculateDelay(attempt);
         console.log(
-          `  [重试] 第 ${attempt}/${MAX_RETRIES} 次失败，${delay}ms 后重试...`,
+          `  [重试] 第 ${attempt}/${MAX_RETRIES} 次，${delay}ms 后...`,
         );
         await sleep(delay);
         hasToolCall = false;
@@ -113,31 +122,28 @@ export async function agentLoop(
     }
 
     messages.push(...stepResponse.messages);
-    if (stepUsage?.inputTokens == null)
-      console.warn("[warn] provider 未返回 inputTokens");
-    if (stepUsage?.outputTokens == null)
-      console.warn("[warn] provider 未返回 outputTokens");
-    const inp = stepUsage?.inputTokens ?? 0;
-    const out = stepUsage?.outputTokens ?? 0;
-    budget.used += inp + out;
-    const pct = Math.round((budget.used / budget.limit) * 100);
-    console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%)`);
-    if (budget.used > budget.limit) {
-      console.log("\n[Token 预算耗尽，强制停止]");
+
+    const inp = stepUsage?.inputTokens?.total ?? stepUsage?.inputTokens ?? 0;
+    const out = stepUsage?.outputTokens?.total ?? stepUsage?.outputTokens ?? 0;
+    totalTokens += inp + out;
+    if (totalTokens > TOKEN_BUDGET * 0.9) {
+      console.log(
+        `  [Token] ${totalTokens}/${TOKEN_BUDGET} (${Math.round((totalTokens / TOKEN_BUDGET) * 100)}%)`,
+      );
+    }
+    if (totalTokens > TOKEN_BUDGET) {
+      console.log("\n[Token 预算耗尽]");
       break;
     }
 
-    // 退出条件：模型没有调用任何工具，说明它认为可以直接回复了
     if (!hasToolCall) {
       if (fullText) console.log();
       break;
     }
 
-    // 还有工具调用 → 继续循环，让模型看到工具结果后继续思考
-    console.log("  → 模型还在工作，继续下一步...");
+    console.log("  → 继续下一步...");
   }
-
   if (step >= MAX_STEPS) {
-    console.log("\n[达到最大步数限制，强制停止]");
+    console.log("\n[达到最大步数]");
   }
 }

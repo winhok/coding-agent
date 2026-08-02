@@ -1,6 +1,6 @@
 /**
  * Modern UI Theme Configuration
- * A cohesive color palette for the coding agent CLI
+ * A cohesive color palette for the super agent CLI
  */
 
 export const theme = {

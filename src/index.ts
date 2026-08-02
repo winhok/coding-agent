@@ -1,19 +1,20 @@
 import "dotenv/config";
-import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
 import { createOpenAI } from "@ai-sdk/openai";
+import type { LanguageModel, ModelMessage } from "ai";
+import { agentLoop } from "./agent/loop.ts";
 import {
-  type Agent,
-  type LanguageModel,
-  type ModelMessage,
-  stepCountIs,
-  ToolLoopAgent,
-} from "ai";
-import { agentLoop, type BudgetState } from "./agent/loop.ts";
+  coreRules,
+  deferredTools,
+  PromptBuilder,
+  type PromptContext,
+  sessionContext,
+  toolGuide,
+} from "./context/prompt-builder.js";
+import { SessionStore } from "./session/store.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
-import { type MCPToolClient, ToolRegistry } from "./tools/registry.ts";
+import { type ToolDefinition, ToolRegistry } from "./tools/registry.ts";
 
 const apiKey = process.env.DASHSCOPE_API_KEY;
 if (!apiKey) {
@@ -27,177 +28,129 @@ const qwen = createOpenAI({
 
 const model: LanguageModel = qwen.chat("qwen-plus-latest");
 
+const registry = new ToolRegistry();
+registry.register(...allTools);
+
+const toolSearchTool: ToolDefinition = {
+  name: "tool_search",
+  description:
+    "获取延迟工具的完整定义。传入工具名（从系统提示的延迟工具列表中选取），返回该工具的完整参数 Schema",
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: '工具名，如 "mcp__github__list_issues"。支持逗号分隔多个',
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  execute: async ({ query }: { query: string }) => {
+    const results = registry.searchTools(query);
+    if (results.length === 0) return `没有找到工具: ${query}`;
+    return results.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }));
+  },
+};
+registry.register(toolSearchTool);
+
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
-export type ConnectMCPOptions = {
-  githubToken?: string;
-  canSpawn?: () => boolean | Promise<boolean>;
-  createClient?: (githubToken: string) => MCPToolClient;
-  log?: (message: string) => void;
-};
-
-type RuntimeOptions = ConnectMCPOptions & {
-  model?: LanguageModel;
-  connectMCP?: boolean;
-};
-
-type AgentTools = ReturnType<ToolRegistry["toAISDKFormat"]>;
-
-export type CodingAgentRuntime = {
-  agent: Agent<never, AgentTools>;
-  registry: ToolRegistry;
-  registeredMCPTools: string[];
-  close(): Promise<void>;
-};
-
-async function detectCanSpawn(): Promise<boolean> {
-  try {
-    const { execSync } = await import("node:child_process");
-    execSync("echo test", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function createGitHubMCPClient(githubToken: string): MCPToolClient {
-  return new MCPClient({
-    type: "http",
-    url: GITHUB_MCP_REMOTE_URL,
-    headers: { Authorization: `Bearer ${githubToken}` },
-  });
-}
-
-export async function connectMCP(
-  targetRegistry: ToolRegistry,
-  options: ConnectMCPOptions = {},
-): Promise<string[]> {
-  const log = options.log ?? console.log;
-  const githubToken =
-    options.githubToken ?? process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+export async function connectMCP(targetRegistry = registry) {
+  const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
 
   if (!githubToken) {
-    log("\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，跳过 GitHub MCP");
+    console.log("\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，跳过 GitHub MCP");
     return [];
   }
 
-  if (options.createClient) {
-    const canSpawn = options.canSpawn
-      ? await options.canSpawn()
-      : await detectCanSpawn();
-    if (!canSpawn) {
-      log("\n当前环境无法启动 MCP 子进程，跳过 GitHub MCP");
-      return [];
-    }
-  }
-
-  log(`\n连接 GitHub MCP Server: ${GITHUB_MCP_REMOTE_URL}`);
+  console.log(`\n连接 GitHub MCP Server: ${GITHUB_MCP_REMOTE_URL}`);
   try {
-    const client = options.createClient
-      ? options.createClient(githubToken)
-      : createGitHubMCPClient(githubToken);
+    const client = new MCPClient({
+      type: "http",
+      url: GITHUB_MCP_REMOTE_URL,
+      headers: { Authorization: `Bearer ${githubToken}` },
+    });
     const tools = await targetRegistry.registerMCPServer("github", client);
-    log(`  已注册 ${tools.length} 个 MCP 工具`);
+    console.log(`  已注册 ${tools.length} 个 MCP 工具`);
     return tools;
   } catch (err) {
-    log(
+    console.log(
       `  MCP 连接失败，已跳过 GitHub MCP: ${err instanceof Error ? err.message : err}`,
     );
     return [];
   }
 }
 
-const SYSTEM = `你是 Coding Agent，一个有工具调用能力的 AI 助手。
-需要查询信息时，主动使用工具，不要编造数据。
-回答要简洁直接。`;
+async function main() {
+  await connectMCP();
 
-export function createRegistry(): ToolRegistry {
-  const registry = new ToolRegistry();
-  registry.register(...allTools);
-  return registry;
-}
+  const isContinue = process.argv.includes("--continue");
+  const sessionId = "default";
+  const store = new SessionStore(sessionId);
 
-export function createAgent(
-  registry: ToolRegistry,
-  runtimeModel: LanguageModel = model,
-): Agent<never, AgentTools> {
-  return new ToolLoopAgent<never, AgentTools>({
-    id: "coding-agent",
-    model: runtimeModel,
-    instructions: SYSTEM,
-    tools: registry.toAISDKFormat(),
-    stopWhen: stepCountIs(15),
-    maxRetries: 0,
-  });
-}
-
-export async function createRuntime(
-  options: RuntimeOptions = {},
-): Promise<CodingAgentRuntime> {
-  const runtimeRegistry = createRegistry();
-  const registeredMCPTools =
-    options.connectMCP === false
-      ? []
-      : await connectMCP(runtimeRegistry, options);
-  const runtimeAgent = createAgent(runtimeRegistry, options.model ?? model);
-
-  return {
-    agent: runtimeAgent,
-    registry: runtimeRegistry,
-    registeredMCPTools,
-    close: async () => {
-      await runtimeRegistry.closeAllMCP();
-    },
-  };
-}
-
-async function runCliAgent(): Promise<void> {
-  const runtime = await createRuntime();
-  const { registry } = runtime;
-
-  console.log(`已注册 ${registry.getAll().length} 个工具：`);
-
-  for (const tool of registry.getAll()) {
-    const flags = [
-      tool.isConcurrencySafe ? "可并发" : "串行",
-      tool.isReadOnly ? "只读" : "读写",
-    ].join(",");
-    console.log(`  - ${tool.name}（${flags}）`);
+  let messages: ModelMessage[] = [];
+  if (isContinue && store.exists()) {
+    messages = store.load();
+    console.log(
+      `\n[Session] 恢复会话 "${sessionId}"，${messages.length} 条历史消息`,
+    );
+  } else {
+    console.log(`\n[Session] 新会话 "${sessionId}"`);
   }
 
-  const messages: ModelMessage[] = [];
-  // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
-  const budget: BudgetState = { used: 0, limit: 15000 };
+  const builder = new PromptBuilder()
+    .pipe("coreRules", coreRules())
+    .pipe("toolGuide", toolGuide())
+    .pipe("deferredTools", deferredTools())
+    .pipe("sessionContext", sessionContext());
+
+  const promptCtx: PromptContext = {
+    toolCount: registry.getActiveTools().length,
+    deferredToolSummary: registry.getDeferredToolSummary(),
+    sessionMessageCount: messages.length,
+    sessionId,
+  };
+
+  const SYSTEM = builder.build(promptCtx);
+
+  builder.debug(promptCtx);
+
+  const activeTools = registry.getActiveTools();
+  console.log(`活跃工具: ${activeTools.length} 个`);
+
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   function ask() {
-    rl.question("\nYou:", async (input) => {
+    rl.question("\nYou: ", async (input) => {
       const trimmed = input.trim();
       if (!trimmed || trimmed === "exit") {
-        console.log("\nBye!");
-        await runtime.close();
+        console.log("Bye!");
+        await registry.closeAllMCP();
         rl.close();
         return;
       }
 
-      messages.push({ role: "user", content: trimmed });
+      const userMsg: ModelMessage = { role: "user", content: trimmed };
+      messages.push(userMsg);
+      store.append(userMsg);
 
-      await agentLoop(model, registry, messages, SYSTEM, budget);
+      const beforeLen = messages.length;
+      await agentLoop(model, registry, messages, SYSTEM);
+
+      // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
+      const newMessages = messages.slice(beforeLen);
+      store.appendAll(newMessages);
 
       ask();
     });
   }
 
-  console.log('欢迎使用 Coding Agent！输入 "exit" 退出。');
   ask();
-}
-
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
-  runCliAgent().catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  });
 }

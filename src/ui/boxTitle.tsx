@@ -8,7 +8,7 @@ export function BoxTitle(): ReactNode {
   return (
     <Box flexDirection="column" alignItems="center" paddingY={1}>
       <Gradient name={gradients.title}>
-        <BigText font="chrome" text="CODING AGENT" />
+        <BigText font="chrome" text="SUPER AGENT" />
       </Gradient>
       <Box gap={1}>
         <Text color={theme.primary}>●</Text>

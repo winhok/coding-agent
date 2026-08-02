@@ -2,58 +2,35 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   getDefaultEnvironment,
   StdioClientTransport,
-  type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
-import {
-  StreamableHTTPClientTransport,
-  type StreamableHTTPClientTransportOptions,
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   type CallToolResult,
   CallToolResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-interface MCPTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-type MCPTextContent = Extract<
-  CallToolResult["content"][number],
-  { type: "text" }
->;
-
-function isTextContent(
-  content: CallToolResult["content"][number],
-): content is MCPTextContent {
-  return content.type === "text";
-}
-
-type StdioMCPClientConfig = {
-  type: "stdio";
-  command: string;
-  args: string[];
-  env?: Record<string, string> | undefined;
-};
-
-type HttpMCPClientConfig = {
-  type: "http";
-  url: string | URL;
-  headers?: Record<string, string> | undefined;
-  fetch?: StreamableHTTPClientTransportOptions["fetch"] | undefined;
-  requestTimeoutMs?: number | undefined;
-};
-
-type MCPClientConfig = StdioMCPClientConfig | HttpMCPClientConfig;
+type MCPClientConfig =
+  | {
+      type: "stdio";
+      command: string;
+      args: string[];
+      env?: Record<string, string> | undefined;
+    }
+  | {
+      type: "http";
+      url: string | URL;
+      headers?: Record<string, string> | undefined;
+      fetch?: typeof fetch | undefined;
+      requestTimeoutMs?: number | undefined;
+    };
 
 const MCP_STREAMABLE_HTTP_ACCEPT = "application/json, text/event-stream";
 const DEFAULT_MCP_HTTP_REQUEST_TIMEOUT_MS = 60_000;
 
 function createHttpFetchWithTimeout(
-  baseFetch: NonNullable<StreamableHTTPClientTransportOptions["fetch"]>,
+  baseFetch: typeof fetch,
   requestTimeoutMs = DEFAULT_MCP_HTTP_REQUEST_TIMEOUT_MS,
-): NonNullable<StreamableHTTPClientTransportOptions["fetch"]> {
+): typeof fetch {
   return async (input, init) => {
     const method = (init?.method ?? "GET").toUpperCase();
     if (method === "GET") {
@@ -102,8 +79,6 @@ export class MCPClient {
   );
   private config: MCPClientConfig;
 
-  constructor(config: MCPClientConfig);
-  constructor(command: string, args: string[], env?: Record<string, string>);
   constructor(
     configOrCommand: MCPClientConfig | string,
     args: string[] = [],
@@ -115,43 +90,39 @@ export class MCPClient {
         : configOrCommand;
   }
 
-  async connect(): Promise<void> {
+  async connect() {
     if (this.config.type === "http") {
-      const transportOptions: StreamableHTTPClientTransportOptions = {};
-      if (this.config.headers) {
-        transportOptions.requestInit = {
-          headers: new Headers(this.config.headers),
-        };
-      }
       const baseFetch = this.config.fetch ?? globalThis.fetch.bind(globalThis);
-      transportOptions.fetch = createHttpFetchWithTimeout(
-        baseFetch,
-        this.config.requestTimeoutMs,
-      );
-
       const transport = new StreamableHTTPClientTransport(
         new URL(this.config.url),
-        transportOptions,
+        {
+          ...(this.config.headers && {
+            requestInit: { headers: new Headers(this.config.headers) },
+          }),
+          fetch: createHttpFetchWithTimeout(
+            baseFetch,
+            this.config.requestTimeoutMs,
+          ),
+        },
       );
       await this.client.connect(transport as Parameters<Client["connect"]>[0]);
       return;
     }
 
-    const transportConfig: StdioServerParameters = {
+    const transportConfig = {
       command: this.config.command,
       args: this.config.args,
+      ...(this.config.env && {
+        env: { ...getDefaultEnvironment(), ...this.config.env },
+      }),
     };
-
-    if (this.config.env) {
-      transportConfig.env = { ...getDefaultEnvironment(), ...this.config.env };
-    }
 
     const transport = new StdioClientTransport(transportConfig);
     await this.client.connect(transport);
   }
 
-  async listTools(): Promise<MCPTool[]> {
-    const tools: MCPTool[] = [];
+  async listTools() {
+    const tools = [];
     let cursor: string | undefined;
 
     do {
@@ -171,32 +142,29 @@ export class MCPClient {
     return tools;
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  async callTool(name: string, args: Record<string, unknown>) {
     const result = (await this.client.callTool(
       { name, arguments: args },
       CallToolResultSchema,
     )) as CallToolResult;
-    const output = formatCallToolResult(result);
+    const texts = (result.content ?? []).flatMap((content) =>
+      content.type === "text" && content.text ? [content.text] : [],
+    );
+    let output = "(无返回内容)";
+
+    if (texts.length > 0) {
+      output = texts.join("\n");
+    } else if (result.structuredContent) {
+      output = JSON.stringify(result.structuredContent, null, 2);
+    } else if (result.toolResult !== undefined) {
+      output = JSON.stringify(result.toolResult, null, 2);
+    }
 
     if (result.isError) return `[MCP tool error] ${output}`;
     return output;
   }
 
-  async close(): Promise<void> {
+  async close() {
     await this.client.close();
   }
-}
-
-function formatCallToolResult(result: CallToolResult): string {
-  const texts = (result.content ?? [])
-    .filter(isTextContent)
-    .filter((content) => content.text)
-    .map((content) => content.text);
-
-  if (texts.length > 0) return texts.join("\n");
-  if (result.structuredContent)
-    return JSON.stringify(result.structuredContent, null, 2);
-  if (result.toolResult !== undefined)
-    return JSON.stringify(result.toolResult, null, 2);
-  return "(无返回内容)";
 }

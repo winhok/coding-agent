@@ -11,7 +11,7 @@ describe("tool-unit registry", () => {
   it("truncates long tool results while preserving head and tail", () => {
     const result = truncateResult("abcdefghij", 6);
 
-    assert.equal(result, "abc\n\n... 省略 4 字符...\n\nhij");
+    assert.equal(result, "abc\n\n... [省略 4 字符] ...\n\nhij");
   });
 
   it("serializes non-concurrency-safe tools behind active read tools", async () => {
@@ -112,7 +112,7 @@ describe("tool-unit registry", () => {
     });
   });
 
-  it("registers MCP tools conservatively by default", async () => {
+  it("registers MCP tools as deferred concurrency-safe reads", async () => {
     const registry = new ToolRegistry();
 
     await registry.registerMCPServer("github", {
@@ -130,11 +130,59 @@ describe("tool-unit registry", () => {
 
     const tool = registry.get("mcp__github__create_issue");
 
-    assert.equal(tool?.isReadOnly, false);
-    assert.equal(tool?.isConcurrencySafe, false);
+    assert.equal(tool?.isReadOnly, true);
+    assert.equal(tool?.isConcurrencySafe, true);
+    assert.equal(tool?.shouldDefer, true);
   });
 
-  it("closes a connected MCP client when tool discovery fails", async () => {
+  it("keeps deferred tools inactive until an exact search discovers them", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "mcp__github__list_issues",
+      description: "List issues",
+      parameters: { type: "object", properties: {} },
+      shouldDefer: true,
+      searchHint: "github issues",
+      execute: async () => "[]",
+    });
+
+    assert.deepEqual(registry.getActiveTools(), []);
+    assert.equal(registry.toAISDKFormat().mcp__github__list_issues, undefined);
+    assert.match(registry.getDeferredToolSummary(), /github issues/);
+
+    assert.equal(
+      registry.searchTools("mcp__github__list_issues")[0]?.name,
+      "mcp__github__list_issues",
+    );
+    assert.equal(registry.getActiveTools().length, 1);
+    assert.notEqual(
+      registry.toAISDKFormat().mcp__github__list_issues,
+      undefined,
+    );
+  });
+
+  it("moves discovered tool tokens from deferred to active", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "deferred_tool",
+      description: "Deferred tool",
+      parameters: { type: "object", properties: {} },
+      shouldDefer: true,
+      execute: async () => "ok",
+    });
+
+    const before = registry.countTokenEstimate();
+    registry.searchTools("deferred_tool");
+    const after = registry.countTokenEstimate();
+
+    assert.equal(before.active, 0);
+    assert.equal(before.total, before.deferred);
+    assert.equal(after.deferred, 0);
+    assert.equal(after.total, after.active);
+    assert.equal(after.total, before.total);
+  });
+
+  it("tracks a connected MCP client for cleanup when tool discovery fails", async () => {
     const registry = new ToolRegistry();
     let closed = false;
 
@@ -152,6 +200,10 @@ describe("tool-unit registry", () => {
         }),
       /list failed/,
     );
+
+    assert.equal(closed, false);
+
+    await registry.closeAllMCP();
 
     assert.equal(closed, true);
   });

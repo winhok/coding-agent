@@ -34,9 +34,8 @@ const BREAKER_THRESHOLD = 10; // 熔断阈值（演示用，生产环境通常�
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify((value as any)[k])}`).join(",")}}`;
 }
 
 function hash(input: string): string {
@@ -73,7 +72,12 @@ export function recordResult(
   const resultH = hashResult(result);
   for (let i = history.length - 1; i >= 0; i--) {
     const r = history[i];
-    if (r && r.toolName === toolName && r.argsHash === argsHash) {
+    if (
+      r &&
+      r.toolName === toolName &&
+      r.argsHash === argsHash &&
+      !r.resultHash
+    ) {
       r.resultHash = resultH;
       break;
     }
@@ -89,6 +93,7 @@ export function resetHistory(): void {
 function getNoProgressStreak(toolName: string, argsHash: string): number {
   let streak = 0;
   let lastResultHash: string | undefined;
+
   for (let i = history.length - 1; i >= 0; i--) {
     const r = history[i];
     if (!r) continue;
@@ -107,6 +112,7 @@ function getNoProgressStreak(toolName: string, argsHash: string): number {
 
 function getPingPongCount(currentHash: string): number {
   if (history.length < 3) return 0;
+
   const last = history[history.length - 1];
   if (!last) return 0;
   let otherHash: string | undefined;
@@ -119,6 +125,7 @@ function getPingPongCount(currentHash: string): number {
     }
   }
   if (!otherHash) return 0;
+
   let count = 0;
   for (let i = history.length - 1; i >= 0; i--) {
     const expected = count % 2 === 0 ? last.argsHash : otherHash;
@@ -127,6 +134,7 @@ function getPingPongCount(currentHash: string): number {
     if (r.argsHash !== expected) break;
     count++;
   }
+
   if (currentHash === otherHash && count >= 2) return count + 1;
   return 0;
 }
@@ -170,6 +178,7 @@ export function detect(toolName: string, params: unknown): DetectionResult {
   const recentCount = history.filter(
     (h) => h.toolName === toolName && h.argsHash === argsHash,
   ).length;
+
   if (recentCount >= CRITICAL_THRESHOLD) {
     return {
       stuck: true,

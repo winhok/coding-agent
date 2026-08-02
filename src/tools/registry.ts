@@ -1,17 +1,4 @@
-import { jsonSchema, type Schema } from "ai";
-import type { JSONSchema7 } from "json-schema";
-
-type ToolExecute = {
-  bivarianceHack(input: unknown): Promise<unknown>;
-}["bivarianceHack"];
-
-type AISDKTool = {
-  description: string;
-  inputSchema: Schema<unknown>;
-  execute(input: unknown): Promise<string>;
-};
-
-type AISDKToolSet = Record<string, AISDKTool>;
+import { jsonSchema } from "ai";
 
 export interface ToolDefinition {
   name: string;
@@ -20,9 +7,9 @@ export interface ToolDefinition {
   isConcurrencySafe?: boolean;
   isReadOnly?: boolean;
   maxResultChars?: number;
+  execute: (input: any) => Promise<unknown>;
   shouldDefer?: boolean; // 是否延迟加载
   searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
-  execute: ToolExecute;
 }
 
 interface MCPTool {
@@ -42,11 +29,14 @@ const DEFAULT_MAX_RESULT_CHARS = 3000;
 
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
+  private mcpClients: MCPToolClient[] = [];
 
   // 三个状态变量构成一把读写锁
   private exclusiveLock = false; // 当前是否有独占锁持有者
   private concurrentCount = 0; // 当前共享锁持有数
   private waitQueue: Array<() => void> = []; // 阻塞等待中的 resolve 函数
+
+  private discoveredTools = new Set<string>();
 
   register(...tools: ToolDefinition[]): void {
     for (const tool of tools) {
@@ -54,51 +44,41 @@ export class ToolRegistry {
     }
   }
 
-  private mcpClients: MCPToolClient[] = [];
-
   async registerMCPServer(
     serverName: string,
     client: MCPToolClient,
   ): Promise<string[]> {
-    let connected = false;
-    try {
-      await client.connect();
-      connected = true;
+    await client.connect();
+    this.mcpClients.push(client);
 
-      const tools = await client.listTools();
-      const registered: string[] = [];
+    const tools = await client.listTools();
+    const registered: string[] = [];
 
-      for (const tool of tools) {
-        const prefixedName = `mcp__${serverName}__${tool.name}`;
-        if (this.tools.has(prefixedName)) continue;
+    for (const tool of tools) {
+      const prefixedName = `mcp__${serverName}__${tool.name}`;
+      if (this.tools.has(prefixedName)) continue;
 
-        const toolClient = client;
-        const originalName = tool.name;
+      const toolClient = client;
+      const originalName = tool.name;
 
-        this.register({
-          name: prefixedName,
-          description: `[MCP:${serverName}] ${tool.description}`,
-          parameters: tool.inputSchema,
-          isConcurrencySafe: false,
-          isReadOnly: false,
-          maxResultChars: DEFAULT_MAX_RESULT_CHARS,
-          shouldDefer: true,
-          searchHint: `${serverName} ${tool.name} ${tool.description}`,
-          execute: async (input) =>
-            toolClient.callTool(originalName, input as Record<string, unknown>),
-        });
+      this.register({
+        name: prefixedName,
+        description: `[MCP:${serverName}] ${tool.description}`,
+        parameters: tool.inputSchema as Record<string, unknown>,
+        isConcurrencySafe: true,
+        isReadOnly: true,
+        maxResultChars: DEFAULT_MAX_RESULT_CHARS,
+        shouldDefer: true,
+        searchHint: `${serverName} ${tool.name} ${tool.description}`,
+        execute: async (input: any) => {
+          return toolClient.callTool(originalName, input);
+        },
+      });
 
-        registered.push(prefixedName);
-      }
-
-      this.mcpClients.push(client);
-      return registered;
-    } catch (error) {
-      if (connected) {
-        await client.close().catch(() => {});
-      }
-      throw error;
+      registered.push(prefixedName);
     }
+
+    return registered;
   }
 
   async closeAllMCP(): Promise<void> {
@@ -114,6 +94,75 @@ export class ToolRegistry {
 
   getAll(): ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  getActiveTools(): ToolDefinition[] {
+    return this.getAll().filter((tool) => {
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  getDeferredToolSummary(): string {
+    const deferred = this.getAll().filter((tool) => {
+      return tool.shouldDefer && !this.discoveredTools.has(tool.name);
+    });
+
+    if (deferred.length === 0) return "";
+
+    const lines = deferred.map((t) => {
+      const hint = t.searchHint ? ` — ${t.searchHint}` : "";
+      return `  - ${t.name}${hint}`;
+    });
+
+    return `\n以下工具可用，但需要先通过 tool_search 搜索获取完整定义：\n${lines.join("\n")}`;
+  }
+
+  searchTools(query: string): ToolDefinition[] {
+    const q = query.trim();
+    const results: ToolDefinition[] = [];
+
+    // 支持逗号分隔的多个工具名，如 "mcp__github__list_issues,mcp__github__search_repositories"
+    const names = q.includes(",")
+      ? q
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+      : [q];
+
+    for (const name of names) {
+      const tool = this.tools.get(name);
+      if (tool && tool.name !== "tool_search") {
+        results.push(tool);
+        this.discoveredTools.add(tool.name);
+      }
+    }
+
+    return results;
+  }
+
+  countTokenEstimate(): { active: number; deferred: number; total: number } {
+    let active = 0;
+    let deferred = 0;
+
+    for (const tool of this.tools.values()) {
+      const schemaSize = JSON.stringify({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }).length;
+      const tokens = Math.ceil(schemaSize / 4);
+
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
+        deferred += tokens;
+      } else {
+        active += tokens;
+      }
+    }
+
+    return { active, deferred, total: active + deferred };
   }
 
   // 获取共享锁：只要没人独占就能拿，多个只读工具可以同时持有
@@ -148,24 +197,23 @@ export class ToolRegistry {
     for (const resolve of waiting) resolve();
   }
 
-  toAISDKFormat(): AISDKToolSet {
-    const result: AISDKToolSet = {};
-    for (const [name, tool] of this.tools) {
+  toAISDKFormat(): Record<string, any> {
+    const result: Record<string, any> = {};
+    const activeTools = this.getActiveTools();
+
+    for (const tool of activeTools) {
       const maxChars = tool.maxResultChars;
       const executeFn = tool.execute;
       const isSafe = tool.isConcurrencySafe === true;
 
-      result[name] = {
+      result[tool.name] = {
         description: tool.description,
-        inputSchema: jsonSchema(tool.parameters as JSONSchema7),
-        execute: async (input: unknown) => {
-          // 在真正执行前先按 isConcurrencySafe 获取锁
+        inputSchema: jsonSchema(tool.parameters as any),
+        execute: async (input: any) => {
           if (isSafe) {
             await this.acquireConcurrent();
-            console.log(`  [并发] ${name} 获取共享锁`);
           } else {
             await this.acquireExclusive();
-            console.log(`  [串行] ${name} 获取独占锁，等待其他工具完成`);
           }
           try {
             const raw = await executeFn(input);
@@ -173,7 +221,6 @@ export class ToolRegistry {
               typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
             return truncateResult(text, maxChars);
           } finally {
-            // 不管成功还是抛异常，锁都要释放
             if (isSafe) {
               this.releaseConcurrent();
             } else {
@@ -192,11 +239,12 @@ export function truncateResult(
   maxChars: number = DEFAULT_MAX_RESULT_CHARS,
 ): string {
   if (text.length <= maxChars) return text;
+
   const headSize = Math.floor(maxChars * 0.6);
   const tailSize = maxChars - headSize;
   const head = text.slice(0, headSize);
   const tail = text.slice(-tailSize);
   const dropped = text.length - headSize - tailSize;
 
-  return `${head}\n\n... 省略 ${dropped} 字符...\n\n${tail}`;
+  return `${head}\n\n... [省略 ${dropped} 字符] ...\n\n${tail}`;
 }
