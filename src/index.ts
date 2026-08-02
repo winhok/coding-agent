@@ -8,6 +8,7 @@ import {
   microcompact,
   summarize,
 } from "./context/compressor.js";
+import { applyDefense, TokenTracker } from "./context/defense.js";
 import {
   coreRules,
   deferredTools,
@@ -96,11 +97,12 @@ export async function connectMCP(targetRegistry = registry) {
 async function main() {
   await connectMCP();
 
-  const isContinue = process.argv.includes("--continue");
-  const sessionId = "default";
-  const store = new SessionStore(sessionId);
-
+  const store = new SessionStore("default");
   let messages: ModelMessage[] = [];
+  const timestamps = new Map<number, number>();
+  const tracker = new TokenTracker();
+  const isContinue = process.argv.includes("--continue");
+
   if (isContinue && store.exists()) {
     messages = store.load();
     console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
@@ -109,6 +111,8 @@ async function main() {
   }
 
   let summary = "";
+
+  tracker.addMessages(messages);
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
@@ -120,7 +124,7 @@ async function main() {
     toolCount: registry.getActiveTools().length,
     deferredToolSummary: registry.getDeferredToolSummary(),
     sessionMessageCount: messages.length,
-    sessionId,
+    sessionId: "default",
   };
 
   const SYSTEM = builder.build(promptCtx);
@@ -144,16 +148,30 @@ async function main() {
 
       const userMsg: ModelMessage = { role: "user", content: trimmed };
       messages.push(userMsg);
+      tracker.addMessage(userMsg);
+      timestamps.set(messages.length - 1, Date.now());
       store.append(userMsg);
+
+      // Apply all three defense layers before every model turn.
+      const turnDefense = applyDefense(messages, timestamps);
+      tracker.replaceMessages(messages, turnDefense.messages);
+      messages = turnDefense.messages;
 
       const beforeLen = messages.length;
       await agentLoop(model, registry, messages, SYSTEM);
 
       const newMessages = messages.slice(beforeLen);
+      const now = Date.now();
+      for (let i = beforeLen; i < messages.length; i++) {
+        timestamps.set(i, now);
+      }
       store.appendAll(newMessages);
 
+      const status = tracker.status;
+      console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
+
       const currentTokens = estimateTokens(messages);
-      if (currentTokens > 4000) {
+      if (currentTokens > 200_000) {
         console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
         const mc2 = microcompact(messages);
         messages = mc2.messages;
