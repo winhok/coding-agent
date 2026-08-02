@@ -50,7 +50,7 @@ export async function agentLoop(
           onError: () => {},
         });
 
-        for await (const part of result.fullStream) {
+        for await (const part of result.stream) {
           switch (part.type) {
             case "text-delta":
               process.stdout.write(part.text);
@@ -100,7 +100,7 @@ export async function agentLoop(
           }
         }
 
-        stepResponse = await result.response;
+        stepResponse = (await result.finalStep).response;
         stepUsage = await result.usage;
         break;
       } catch (error) {

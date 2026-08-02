@@ -1,8 +1,13 @@
 import "dotenv/config";
 import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
-import type { LanguageModel, ModelMessage } from "ai";
+import type { ModelMessage } from "ai";
 import { agentLoop } from "./agent/loop.ts";
+import {
+  estimateTokens,
+  microcompact,
+  summarize,
+} from "./context/compressor.js";
 import {
   coreRules,
   deferredTools,
@@ -14,7 +19,7 @@ import {
 import { SessionStore } from "./session/store.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
-import { type ToolDefinition, ToolRegistry } from "./tools/registry.ts";
+import { type ToolDefinition, ToolRegistry } from "./tools/registry.js";
 
 const apiKey = process.env.DASHSCOPE_API_KEY;
 if (!apiKey) {
@@ -26,7 +31,7 @@ const qwen = createOpenAI({
   apiKey,
 });
 
-const model: LanguageModel = qwen.chat("qwen-plus-latest");
+const model = qwen.chat("qwen-plus-latest");
 
 const registry = new ToolRegistry();
 registry.register(...allTools);
@@ -98,12 +103,12 @@ async function main() {
   let messages: ModelMessage[] = [];
   if (isContinue && store.exists()) {
     messages = store.load();
-    console.log(
-      `\n[Session] 恢复会话 "${sessionId}"，${messages.length} 条历史消息`,
-    );
+    console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
   } else {
-    console.log(`\n[Session] 新会话 "${sessionId}"`);
+    console.log("[Session] 新会话");
   }
+
+  let summary = "";
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
@@ -144,9 +149,26 @@ async function main() {
       const beforeLen = messages.length;
       await agentLoop(model, registry, messages, SYSTEM);
 
-      // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
       const newMessages = messages.slice(beforeLen);
       store.appendAll(newMessages);
+
+      const currentTokens = estimateTokens(messages);
+      if (currentTokens > 4000) {
+        console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
+        const mc2 = microcompact(messages);
+        messages = mc2.messages;
+        if (mc2.cleared > 0)
+          console.log(`  [Microcompact] 清理了 ${mc2.cleared} 个工具结果`);
+
+        const comp2 = await summarize(model, messages, summary);
+        if (comp2.compressedCount > 0) {
+          messages = comp2.messages;
+          summary = comp2.summary;
+          console.log(
+            `  [Summarization] 压缩了 ${comp2.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+          );
+        }
+      }
 
       ask();
     });
@@ -154,3 +176,5 @@ async function main() {
 
   ask();
 }
+
+main().catch(console.error);

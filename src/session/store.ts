@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ModelMessage } from "ai";
 
 const SESSION_DIR = ".sessions";
+const DEFAULT_SESSION = "default";
 
 export interface SessionEntry {
   type: "message";
@@ -14,7 +15,7 @@ export class SessionStore {
   private dir: string;
   private sessionId: string;
 
-  constructor(sessionId: string = "default") {
+  constructor(sessionId: string = DEFAULT_SESSION) {
     this.sessionId = sessionId;
     this.dir = SESSION_DIR;
     if (!existsSync(this.dir)) {
@@ -43,6 +44,7 @@ export class SessionStore {
 
   load(): ModelMessage[] {
     if (!existsSync(this.filePath)) return [];
+
     const content = readFileSync(this.filePath, "utf-8").trim();
     if (!content) return [];
 
@@ -55,7 +57,7 @@ export class SessionStore {
           messages.push(entry.message);
         }
       } catch {
-        /* skip malformed lines */
+        // skip malformed lines
       }
     }
     return messages;
@@ -63,5 +65,9 @@ export class SessionStore {
 
   exists(): boolean {
     return existsSync(this.filePath);
+  }
+
+  getMessageCount(): number {
+    return this.load().length;
   }
 }

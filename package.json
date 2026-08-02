@@ -7,8 +7,8 @@
   "type": "module",
   "files": ["dist"],
   "scripts": {
-    "start": "node dist/main.js",
-    "dev": "tsx --watch src/main.ts",
+    "start": "tsx src/index.ts",
+    "continue": "tsx src/index.ts --continue",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "pnpm clean && tsc -b tsconfig.build.json --force",
     "typecheck": "tsc -b --force",

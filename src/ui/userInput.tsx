@@ -4,6 +4,7 @@ import {
   convertToModelMessages,
   createIdGenerator,
   readUIMessageStream,
+  toUIMessageStream,
   type UIMessage,
 } from "ai";
 import { Box, Text } from "ink";
@@ -37,7 +38,8 @@ export function UserInput({ agent }: UserInputProps): ReactNode {
       });
 
       const uiMessageStream = readUIMessageStream({
-        stream: result.toUIMessageStream({
+        stream: toUIMessageStream({
+          stream: result.stream,
           generateMessageId: createIdGenerator({
             prefix: "assistant",
             size: 16,
@@ -54,7 +56,7 @@ export function UserInput({ agent }: UserInputProps): ReactNode {
         }
       }
 
-      const { totalTokens } = await result.totalUsage;
+      const { totalTokens } = await result.usage;
       uiStore.totalUsedTokens = totalTokens ?? 0;
     } finally {
       uiStore.isThinking = false;
