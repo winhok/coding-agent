@@ -1,4 +1,4 @@
-import { type ModelMessage, streamText } from "ai";
+import { type LanguageModel, type ModelMessage, streamText } from "ai";
 import type { ToolRegistry } from "../tools/registry.js";
 import {
   detect,
@@ -10,7 +10,6 @@ import { calculateDelay, isRetryable, sleep } from "./retry.js";
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
-const TOKEN_BUDGET = 50000;
 
 export interface BudgetState {
   used: number;
@@ -18,7 +17,7 @@ export interface BudgetState {
 }
 
 export async function agentLoop(
-  model: any,
+  model: LanguageModel,
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
@@ -113,7 +112,7 @@ export async function agentLoop(
       break;
     }
 
-    messages.push(...stepResponse!.messages);
+    messages.push(...stepResponse.messages);
     if (stepUsage?.inputTokens == null)
       console.warn("[warn] provider 未返回 inputTokens");
     if (stepUsage?.outputTokens == null)

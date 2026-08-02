@@ -1,6 +1,9 @@
 allowBuilds:
   esbuild: true
   lefthook: true
+minimumReleaseAgeExclude:
+  - '@ai-sdk/gateway@4.0.37'
+  - ai@7.0.48
 onlyBuiltDependencies:
   - esbuild
   - lefthook

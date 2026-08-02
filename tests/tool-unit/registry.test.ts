@@ -53,12 +53,16 @@ describe("tool-unit registry", () => {
     const registry = new ToolRegistry();
     registry.register(safeRead, exclusiveWrite);
     const formatted = registry.toAISDKFormat();
+    const formattedRead = formatted.safe_read;
+    const formattedWrite = formatted.exclusive_write;
+    assert.ok(formattedRead);
+    assert.ok(formattedWrite);
 
     await withMutedConsole(async () => {
-      const readPromise = formatted.safe_read.execute({});
+      const readPromise = formattedRead.execute({});
       await readStartedPromise;
 
-      const writePromise = formatted.exclusive_write.execute({});
+      const writePromise = formattedWrite.execute({});
       await new Promise((resolve) => setTimeout(resolve, 10));
       assert.equal(writeObservedReadFinished, undefined);
 
@@ -91,10 +95,14 @@ describe("tool-unit registry", () => {
     const registry = new ToolRegistry();
     registry.register(makeReadTool("read_a"), makeReadTool("read_b"));
     const formatted = registry.toAISDKFormat();
+    const firstRead = formatted.read_a;
+    const secondRead = formatted.read_b;
+    assert.ok(firstRead);
+    assert.ok(secondRead);
 
     await withMutedConsole(async () => {
-      const first = formatted.read_a.execute({});
-      const second = formatted.read_b.execute({});
+      const first = firstRead.execute({});
+      const second = secondRead.execute({});
       await new Promise((resolve) => setTimeout(resolve, 10));
       assert.equal(started, 2);
 

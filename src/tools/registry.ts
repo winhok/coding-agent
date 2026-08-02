@@ -1,4 +1,17 @@
-import { jsonSchema } from "ai";
+import { jsonSchema, type Schema } from "ai";
+import type { JSONSchema7 } from "json-schema";
+
+type ToolExecute = {
+  bivarianceHack(input: unknown): Promise<unknown>;
+}["bivarianceHack"];
+
+type AISDKTool = {
+  description: string;
+  inputSchema: Schema<unknown>;
+  execute(input: unknown): Promise<string>;
+};
+
+type AISDKToolSet = Record<string, AISDKTool>;
 
 export interface ToolDefinition {
   name: string;
@@ -7,7 +20,9 @@ export interface ToolDefinition {
   isConcurrencySafe?: boolean;
   isReadOnly?: boolean;
   maxResultChars?: number;
-  execute: (input: any) => Promise<unknown>;
+  shouldDefer?: boolean; // 是否延迟加载
+  searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
+  execute: ToolExecute;
 }
 
 interface MCPTool {
@@ -63,13 +78,14 @@ export class ToolRegistry {
         this.register({
           name: prefixedName,
           description: `[MCP:${serverName}] ${tool.description}`,
-          parameters: tool.inputSchema as Record<string, unknown>,
+          parameters: tool.inputSchema,
           isConcurrencySafe: false,
           isReadOnly: false,
-          maxResultChars: 3000,
-          execute: async (input: Record<string, unknown>) => {
-            return toolClient.callTool(originalName, input);
-          },
+          maxResultChars: DEFAULT_MAX_RESULT_CHARS,
+          shouldDefer: true,
+          searchHint: `${serverName} ${tool.name} ${tool.description}`,
+          execute: async (input) =>
+            toolClient.callTool(originalName, input as Record<string, unknown>),
         });
 
         registered.push(prefixedName);
@@ -132,8 +148,8 @@ export class ToolRegistry {
     for (const resolve of waiting) resolve();
   }
 
-  toAISDKFormat(): Record<string, any> {
-    const result: Record<string, any> = {};
+  toAISDKFormat(): AISDKToolSet {
+    const result: AISDKToolSet = {};
     for (const [name, tool] of this.tools) {
       const maxChars = tool.maxResultChars;
       const executeFn = tool.execute;
@@ -141,8 +157,8 @@ export class ToolRegistry {
 
       result[name] = {
         description: tool.description,
-        inputSchema: jsonSchema(tool.parameters as any),
-        execute: async (input: any) => {
+        inputSchema: jsonSchema(tool.parameters as JSONSchema7),
+        execute: async (input: unknown) => {
           // 在真正执行前先按 isConcurrencySafe 获取锁
           if (isSafe) {
             await this.acquireConcurrent();
