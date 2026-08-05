@@ -1,5 +1,12 @@
-import { type LanguageModel, type ModelMessage, streamText } from "ai";
+import {
+  type LanguageModel,
+  type LanguageModelResponseMetadata,
+  type LanguageModelUsage,
+  type ModelMessage,
+  streamText,
+} from "ai";
 import type { ToolRegistry } from "../tools/registry.js";
+import { normalizeUsage, type UsageTracker } from "../usage/tracker.js";
 import {
   detect,
   recordCall,
@@ -22,6 +29,7 @@ export async function agentLoop(
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
+  tracker?: UsageTracker,
 ) {
   let step = 0;
   let totalTokens = 0;
@@ -35,8 +43,8 @@ export async function agentLoop(
     let fullText = "";
     let shouldBreak = false;
     let lastToolCall: { name: string; input: unknown } | null = null;
-    let stepResponse: any;
-    let stepUsage: any;
+    let stepResponse: LanguageModelResponseMetadata | undefined;
+    let stepUsage: LanguageModelUsage | undefined;
 
     for (let attempt = 1; ; attempt++) {
       try {
@@ -86,7 +94,7 @@ export async function agentLoop(
                   ? part.output
                   : JSON.stringify(part.output);
               const preview =
-                output.length > 120 ? output.slice(0, 120) + "..." : output;
+                output.length > 120 ? `${output.slice(0, 120)}...` : output;
               console.log(`  [结果: ${part.toolName}] ${preview}`);
               if (lastToolCall) {
                 recordResult(
@@ -100,7 +108,8 @@ export async function agentLoop(
           }
         }
 
-        stepResponse = (await result.finalStep).response;
+        const finalStep = await result.finalStep;
+        stepResponse = finalStep.response;
         stepUsage = await result.usage;
         break;
       } catch (error) {
@@ -121,11 +130,39 @@ export async function agentLoop(
       break;
     }
 
+    if (!stepResponse || !stepUsage) {
+      throw new Error(
+        "Model step completed without response metadata or usage",
+      );
+    }
+
     messages.push(...stepResponse.messages);
 
-    const inp = stepUsage?.inputTokens?.total ?? stepUsage?.inputTokens ?? 0;
-    const out = stepUsage?.outputTokens?.total ?? stepUsage?.outputTokens ?? 0;
-    totalTokens += inp + out;
+    const modelId = typeof model === "string" ? model : model.modelId;
+    const norm = normalizeUsage(stepUsage);
+    const stepRecord = tracker?.record(modelId, norm);
+    totalTokens +=
+      norm.inputTokens +
+      norm.outputTokens +
+      norm.cacheReadTokens +
+      norm.cacheWriteTokens;
+
+    if (
+      stepRecord &&
+      (stepRecord.cacheReadTokens > 0 || stepRecord.cacheWriteTokens > 0)
+    ) {
+      const isHit = stepRecord.cacheReadTokens > 0;
+      const tag = isHit
+        ? "\x1b[38;5;36m✓ cache hit\x1b[0m"
+        : "\x1b[38;5;220m✎ cache write\x1b[0m";
+      const detail = isHit
+        ? `read ${stepRecord.cacheReadTokens}`
+        : `write ${stepRecord.cacheWriteTokens}`;
+      const currency = stepRecord.currency === "CNY" ? "¥" : "$";
+      console.log(
+        `  [${tag}] ${detail} tokens · 本步 ${currency}${stepRecord.cost.toFixed(5)}`,
+      );
+    }
     if (totalTokens > TOKEN_BUDGET * 0.9) {
       console.log(
         `  [Token] ${totalTokens}/${TOKEN_BUDGET} (${Math.round((totalTokens / TOKEN_BUDGET) * 100)}%)`,

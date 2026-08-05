@@ -17,10 +17,20 @@ import {
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder.js";
+import {
+  buildContextSnapshot,
+  renderContextView,
+  renderUsageView,
+} from "./context/view.js";
 import { SessionStore } from "./session/store.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
 import { type ToolDefinition, ToolRegistry } from "./tools/registry.js";
+import { UsageTracker } from "./usage/tracker.js";
+
+const MODEL_NAME = "Qwen 3.7 Plus (2026-05-26)";
+const CONTEXT_WINDOW_TOKENS = 1_000_000;
+const AUTOCOMPACT_THRESHOLD_TOKENS = 200_000;
 
 const apiKey = process.env.DASHSCOPE_API_KEY;
 if (!apiKey) {
@@ -32,7 +42,7 @@ const qwen = createOpenAI({
   apiKey,
 });
 
-const model = qwen.chat("qwen-plus-latest");
+const model = qwen.chat("qwen3.7-plus-2026-05-26");
 
 const registry = new ToolRegistry();
 registry.register(...allTools);
@@ -100,7 +110,8 @@ async function main() {
   const store = new SessionStore("default");
   let messages: ModelMessage[] = [];
   const timestamps = new Map<number, number>();
-  const tracker = new TokenTracker();
+  const tokenTracker = new TokenTracker();
+  const usageTracker = new UsageTracker();
   const isContinue = process.argv.includes("--continue");
 
   if (isContinue && store.exists()) {
@@ -112,7 +123,7 @@ async function main() {
 
   let summary = "";
 
-  tracker.addMessages(messages);
+  tokenTracker.addMessages(messages);
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
@@ -146,19 +157,75 @@ async function main() {
         return;
       }
 
+      if (trimmed === "/context") {
+        const toolDescriptionChars = registry
+          .getActiveTools()
+          .reduce(
+            (total, tool) =>
+              total +
+              JSON.stringify({
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              }).length,
+            0,
+          );
+        const snapshot = buildContextSnapshot({
+          modelName: MODEL_NAME,
+          modelId: model.modelId,
+          windowTokens: CONTEXT_WINDOW_TOKENS,
+          systemPromptChars: SYSTEM.length,
+          toolDescriptionChars,
+          memoryChars: 0,
+          skillsChars: 0,
+          messages,
+          autocompactBufferTokens:
+            CONTEXT_WINDOW_TOKENS - AUTOCOMPACT_THRESHOLD_TOKENS,
+        });
+        console.log(renderContextView(snapshot));
+        ask();
+        return;
+      }
+
+      if (trimmed === "/usage") {
+        console.log(renderUsageView(usageTracker));
+        ask();
+        return;
+      }
+
+      if (trimmed.startsWith("/cache")) {
+        const mode = trimmed.split(/\s+/)[1];
+        if (mode === "on" || mode === "off") {
+          usageTracker.setCacheEnabled(mode === "on");
+          const message =
+            mode === "on"
+              ? "按 API 返回的 cache token 计算实际费用"
+              : "后续 cache token 将按普通 input 全价计算（仅成本模拟，不改变服务端行为）";
+          console.log(`  [Cache] ${message}`);
+        } else {
+          console.log(
+            `  [Cache] 当前为${usageTracker.cacheEnabled ? "实际计费" : "无缓存成本模拟"}模式。用法：/cache on | /cache off`,
+          );
+        }
+        console.log(
+          "  [Cache] 当前使用 qwen3.7-plus-2026-05-26 的隐式缓存，未添加显式缓存标记。",
+        );
+        ask();
+        return;
+      }
+
       const userMsg: ModelMessage = { role: "user", content: trimmed };
       messages.push(userMsg);
-      tracker.addMessage(userMsg);
+      tokenTracker.addMessage(userMsg);
       timestamps.set(messages.length - 1, Date.now());
       store.append(userMsg);
 
-      // Apply all three defense layers before every model turn.
       const turnDefense = applyDefense(messages, timestamps);
-      tracker.replaceMessages(messages, turnDefense.messages);
+      tokenTracker.replaceMessages(messages, turnDefense.messages);
       messages = turnDefense.messages;
 
       const beforeLen = messages.length;
-      await agentLoop(model, registry, messages, SYSTEM);
+      await agentLoop(model, registry, messages, SYSTEM, usageTracker);
 
       const newMessages = messages.slice(beforeLen);
       const now = Date.now();
@@ -167,7 +234,7 @@ async function main() {
       }
       store.appendAll(newMessages);
 
-      const status = tracker.status;
+      const status = tokenTracker.status;
       console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
 
       const currentTokens = estimateTokens(messages);
