@@ -4,7 +4,6 @@ import {
   toolResultOutputToText,
 } from "./tool-result-output.js";
 
-/** Estimate token count: ~4 chars per token for mixed Chinese/English. */
 function estimateTokens(messages: ModelMessage[]): number {
   let chars = 0;
   for (const msg of messages) {
@@ -22,8 +21,6 @@ function estimateTokens(messages: ModelMessage[]): number {
   }
   return Math.ceil(chars / 4);
 }
-
-// ── Layer 1: Microcompact ────────────────────────────
 
 const CLEARABLE_TOOLS = new Set([
   "read_file",
@@ -76,8 +73,6 @@ export function microcompact(messages: ModelMessage[]): {
   return { messages: result, cleared };
 }
 
-// ── Layer 2: LLM Summarization ───────────────────────
-
 const COMPRESS_PROMPT = `你是一个对话压缩系统。你的任务是把 Agent 和用户之间的对话历史压缩成一份结构化摘要，确保后续对话能够无缝继续。
 
 请严格按照以下模板输出，每个字段都要填写。如果某个字段没有相关内容，写"无"：
@@ -127,7 +122,6 @@ export async function summarize(
 
   const splitIdx = Math.max(0, messages.length - KEEP_RECENT_MESSAGES);
 
-  // Align to user message boundary
   let alignedIdx = splitIdx;
   while (alignedIdx > 0 && messages[alignedIdx]?.role !== "user") {
     alignedIdx--;

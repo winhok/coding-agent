@@ -3,6 +3,9 @@ import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
 import { agentLoop } from "./agent/loop.ts";
+import { contextCommands } from "./commands/context.js";
+import { type CommandContext, createDispatcher } from "./commands/index.js";
+import { memoryCommands } from "./commands/memory.js";
 import {
   estimateTokens,
   microcompact,
@@ -12,25 +15,31 @@ import { applyDefense, TokenTracker } from "./context/defense.js";
 import {
   coreRules,
   deferredTools,
+  memoryContext,
   PromptBuilder,
   type PromptContext,
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder.js";
-import {
-  buildContextSnapshot,
-  renderContextView,
-  renderUsageView,
-} from "./context/view.js";
-import { SessionStore } from "./session/store.js";
+import { MemoryStore } from "./memory/store.js";
+import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
-import { type ToolDefinition, ToolRegistry } from "./tools/registry.js";
-import { UsageTracker } from "./usage/tracker.js";
+import { createMemoryTool } from "./tools/memory-tools.js";
+import { ToolRegistry } from "./tools/registry.js";
+import { createToolSearchTool } from "./tools/tool-search.js";
+import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
 
-const MODEL_NAME = "Qwen 3.7 Plus (2026-05-26)";
-const CONTEXT_WINDOW_TOKENS = 1_000_000;
-const AUTOCOMPACT_THRESHOLD_TOKENS = 200_000;
+const MODEL_CONFIG = {
+  id: "qwen3.7-plus-2026-05-26",
+  name: "Qwen 3.7 Plus (2026-05-26)",
+  contextWindowTokens: 1_000_000,
+  effectiveContextWindowTokens: 950_000,
+} as const;
+const AUTOCOMPACT_THRESHOLD_RATIO = 0.2;
+const AUTOCOMPACT_THRESHOLD_TOKENS = Math.round(
+  MODEL_CONFIG.contextWindowTokens * AUTOCOMPACT_THRESHOLD_RATIO,
+);
 
 const apiKey = process.env.DASHSCOPE_API_KEY;
 if (!apiKey) {
@@ -42,39 +51,15 @@ const qwen = createOpenAI({
   apiKey,
 });
 
-const model = qwen.chat("qwen3.7-plus-2026-05-26");
+const model = qwen.chat(MODEL_CONFIG.id);
 
 const registry = new ToolRegistry();
 registry.register(...allTools);
+registry.register(createToolSearchTool(registry));
 
-const toolSearchTool: ToolDefinition = {
-  name: "tool_search",
-  description:
-    "获取延迟工具的完整定义。传入工具名（从系统提示的延迟工具列表中选取），返回该工具的完整参数 Schema",
-  parameters: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        description: '工具名，如 "mcp__github__list_issues"。支持逗号分隔多个',
-      },
-    },
-    required: ["query"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ query }: { query: string }) => {
-    const results = registry.searchTools(query);
-    if (results.length === 0) return `没有找到工具: ${query}`;
-    return results.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }));
-  },
-};
-registry.register(toolSearchTool);
+const memoryStore = new MemoryStore(".");
+memoryStore.init();
+registry.register(createMemoryTool(memoryStore));
 
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
@@ -104,18 +89,45 @@ export async function connectMCP(targetRegistry = registry) {
   }
 }
 
+const dispatch = createDispatcher([...contextCommands, ...memoryCommands]);
+
 async function main() {
   await connectMCP();
 
   const store = new SessionStore("default");
   let messages: ModelMessage[] = [];
   const timestamps = new Map<number, number>();
-  const tokenTracker = new TokenTracker();
-  const usageTracker = new UsageTracker();
+  const tracker = new UsageTracker(".usage/today.jsonl");
+
+  const tokenTracker = new TokenTracker(
+    MODEL_CONFIG.effectiveContextWindowTokens,
+  );
   const isContinue = process.argv.includes("--continue");
 
+  const builder = new PromptBuilder()
+    .pipe("coreRules", coreRules())
+    .pipe("toolGuide", toolGuide())
+    .pipe("deferredTools", deferredTools())
+    .pipe("memory", memoryContext(memoryStore))
+    .pipe("sessionContext", sessionContext());
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  function makePromptCtx(): PromptContext {
+    return {
+      toolCount: registry.getActiveTools().length,
+      deferredToolSummary: registry.getDeferredToolSummary(),
+      sessionMessageCount: messages.length,
+      sessionId: "default",
+    };
+  }
+
   if (isContinue && store.exists()) {
-    messages = store.load();
+    const loaded = store.load();
+    messages = loaded.messages;
+    for (const [index, timestamp] of loaded.timestamps) {
+      timestamps.set(index, timestamp);
+    }
     console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
   } else {
     console.log("[Session] 新会话");
@@ -125,91 +137,82 @@ async function main() {
 
   tokenTracker.addMessages(messages);
 
-  const builder = new PromptBuilder()
-    .pipe("coreRules", coreRules())
-    .pipe("toolGuide", toolGuide())
-    .pipe("deferredTools", deferredTools())
-    .pipe("sessionContext", sessionContext());
-
-  const promptCtx: PromptContext = {
-    toolCount: registry.getActiveTools().length,
-    deferredToolSummary: registry.getDeferredToolSummary(),
-    sessionMessageCount: messages.length,
-    sessionId: "default",
-  };
-
-  const SYSTEM = builder.build(promptCtx);
-
-  builder.debug(promptCtx);
+  builder.debug(makePromptCtx());
 
   const activeTools = registry.getActiveTools();
   console.log(`活跃工具: ${activeTools.length} 个`);
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  function replaceMessages(nextMessages: ModelMessage[]) {
+    const nextTimestamps = remapMessageTimestamps(
+      messages,
+      nextMessages,
+      timestamps,
+    );
+    tokenTracker.replaceMessages(messages, nextMessages);
+    messages.splice(0, messages.length, ...nextMessages);
+    timestamps.clear();
+    for (const [index, timestamp] of nextTimestamps) {
+      timestamps.set(index, timestamp);
+    }
+  }
+
+  async function compactIfNeeded(): Promise<boolean> {
+    const currentTokens = tokenTracker.estimatedTokens;
+    if (currentTokens <= AUTOCOMPACT_THRESHOLD_TOKENS) return false;
+
+    console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
+    const compacted = microcompact(messages);
+    replaceMessages(compacted.messages);
+    if (compacted.cleared > 0) {
+      console.log(`  [Microcompact] 清理了 ${compacted.cleared} 个工具结果`);
+    }
+
+    const compression = await summarize(model, messages, summary);
+    if (compression.compressedCount > 0) {
+      replaceMessages(compression.messages);
+      summary = compression.summary;
+      console.log(
+        `  [Summarization] 压缩了 ${compression.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+      );
+    }
+    return true;
+  }
 
   function ask() {
     rl.question("\nYou: ", async (input) => {
       const trimmed = input.trim();
-      if (!trimmed || trimmed === "exit") {
+      if (trimmed === "/exit") {
         console.log("Bye!");
         await registry.closeAllMCP();
         rl.close();
         return;
       }
-
-      if (trimmed === "/context") {
-        const toolDescriptionChars = registry
-          .getActiveTools()
-          .reduce(
-            (total, tool) =>
-              total +
-              JSON.stringify({
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              }).length,
-            0,
-          );
-        const snapshot = buildContextSnapshot({
-          modelName: MODEL_NAME,
-          modelId: model.modelId,
-          windowTokens: CONTEXT_WINDOW_TOKENS,
-          systemPromptChars: SYSTEM.length,
-          toolDescriptionChars,
-          memoryChars: 0,
-          skillsChars: 0,
-          messages,
-          autocompactBufferTokens:
-            CONTEXT_WINDOW_TOKENS - AUTOCOMPACT_THRESHOLD_TOKENS,
-        });
-        console.log(renderContextView(snapshot));
+      if (!trimmed) {
         ask();
         return;
       }
 
-      if (trimmed === "/usage") {
-        console.log(renderUsageView(usageTracker));
-        ask();
-        return;
-      }
-
-      if (trimmed.startsWith("/cache")) {
-        const mode = trimmed.split(/\s+/)[1];
-        if (mode === "on" || mode === "off") {
-          usageTracker.setCacheEnabled(mode === "on");
-          const message =
-            mode === "on"
-              ? "按 API 返回的 cache token 计算实际费用"
-              : "后续 cache token 将按普通 input 全价计算（仅成本模拟，不改变服务端行为）";
-          console.log(`  [Cache] ${message}`);
-        } else {
-          console.log(
-            `  [Cache] 当前为${usageTracker.cacheEnabled ? "实际计费" : "无缓存成本模拟"}模式。用法：/cache on | /cache off`,
-          );
-        }
-        console.log(
-          "  [Cache] 当前使用 qwen3.7-plus-2026-05-26 的隐式缓存，未添加显式缓存标记。",
-        );
+      const ctx: CommandContext = {
+        messages,
+        timestamps,
+        registry,
+        builder,
+        tracker,
+        sessionStore: store,
+        model,
+        makePromptCtx,
+        ask,
+        replaceMessages,
+        memoryStore,
+        modelName: MODEL_CONFIG.name,
+        modelId: typeof model === "string" ? model : model.modelId,
+        contextWindowTokens: MODEL_CONFIG.contextWindowTokens,
+        autocompactThresholdTokens: AUTOCOMPACT_THRESHOLD_TOKENS,
+        estimatedContextTokens: tokenTracker.estimatedTokens,
+      };
+      const handled = dispatch(trimmed, ctx);
+      if (handled === "async") return;
+      if (handled) {
         ask();
         return;
       }
@@ -220,44 +223,61 @@ async function main() {
       timestamps.set(messages.length - 1, Date.now());
       store.append(userMsg);
 
-      const turnDefense = applyDefense(messages, timestamps);
-      tokenTracker.replaceMessages(messages, turnDefense.messages);
-      messages = turnDefense.messages;
+      const turnDefense = applyDefense(
+        messages,
+        timestamps,
+        MODEL_CONFIG.effectiveContextWindowTokens,
+      );
+      replaceMessages(turnDefense.messages);
+      await compactIfNeeded();
 
-      const beforeLen = messages.length;
-      await agentLoop(model, registry, messages, SYSTEM, usageTracker);
+      const currentSystem = builder.build(makePromptCtx());
+      const newMessages = await agentLoop(
+        model,
+        registry,
+        messages,
+        currentSystem,
+        tracker,
+        async (usage, responseMessages, needsFollowUp) => {
+          const promptTokens = promptTokensFromUsage(usage);
+          if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
+          tokenTracker.addMessages(responseMessages);
+          const responseStart = messages.length - responseMessages.length;
+          const now = Date.now();
+          for (let index = responseStart; index < messages.length; index++) {
+            timestamps.set(index, now);
+          }
+          if (needsFollowUp) await compactIfNeeded();
+        },
+      );
 
-      const newMessages = messages.slice(beforeLen);
       const now = Date.now();
-      for (let i = beforeLen; i < messages.length; i++) {
-        timestamps.set(i, now);
+      for (const message of newMessages) {
+        const index = messages.indexOf(message);
+        if (index >= 0 && !timestamps.has(index)) timestamps.set(index, now);
       }
       store.appendAll(newMessages);
 
       const status = tokenTracker.status;
       console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
 
-      const currentTokens = estimateTokens(messages);
-      if (currentTokens > 200_000) {
-        console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
-        const mc2 = microcompact(messages);
-        messages = mc2.messages;
-        if (mc2.cleared > 0)
-          console.log(`  [Microcompact] 清理了 ${mc2.cleared} 个工具结果`);
-
-        const comp2 = await summarize(model, messages, summary);
-        if (comp2.compressedCount > 0) {
-          messages = comp2.messages;
-          summary = comp2.summary;
-          console.log(
-            `  [Summarization] 压缩了 ${comp2.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
-          );
-        }
-      }
+      await compactIfNeeded();
 
       ask();
     });
   }
+
+  console.log('Super Agent v0.11 — Memory System (type "/exit" to quit)');
+  console.log("快捷命令：");
+  console.log("  /memory         — 查看所有记忆");
+  console.log("  /memory search <关键词> — 搜索记忆");
+  console.log("  /context        — 终端里看 context 占用矩阵");
+  console.log("  /usage          — 累计 token 用量和成本");
+  console.log("  /status         — 当前消息数、token 和记忆数");
+  console.log("  /exit           — 退出");
+  console.log("");
+  console.log(`  已加载 ${memoryStore.list().length} 条历史记忆`);
+  console.log("");
 
   ask();
 }

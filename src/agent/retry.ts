@@ -1,11 +1,8 @@
-// --- 错误分类 ---
-
 export function isRetryable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
 
   const message = error.message || "";
 
-  // HTTP 状态码判断
   const statusStr = message.match(/(\d{3})/)?.[1];
   if (statusStr) {
     const status = parseInt(statusStr, 10);
@@ -13,18 +10,14 @@ export function isRetryable(error: unknown): boolean {
     if (status >= 500 && status < 600) return true;
     if (status >= 400 && status < 500) return false;
   }
-  // 网络错误
   if (message.includes("ECONNRESET") || message.includes("EPIPE")) return true;
   if (message.includes("ETIMEDOUT") || message.includes("timeout")) return true;
   if (message.includes("fetch failed") || message.includes("network"))
     return true;
-  // AI SDK 会把流式错误包装成 NoOutputGeneratedError
   if (message.includes("No output generated")) return true;
 
   return false;
 }
-
-// --- 指数退避 + 随机抖动 ---
 
 export function calculateDelay(
   attempt: number,

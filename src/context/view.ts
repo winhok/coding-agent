@@ -44,10 +44,24 @@ function fmtTokens(tokens: number): string {
   return String(tokens);
 }
 
+function fmtLocalTimestamp(date: Date): string {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timestamp = new Intl.DateTimeFormat("sv-SE", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+  return `${timestamp} ${timeZone}`;
+}
+
 export function renderContextMatrix(snapshot: ContextSnapshot): string {
   const { windowTokens, slices, autocompactBufferTokens } = snapshot;
-  const totalCells = 256;
-  const tokensPerCell = windowTokens / totalCells;
+  const TOTAL_CELLS = 256;
+  const tokensPerCell = windowTokens / TOTAL_CELLS;
   const cells: number[] = [];
 
   for (const slice of slices) {
@@ -55,7 +69,7 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
     const sliceCells = Math.max(1, Math.round(slice.tokens / tokensPerCell));
     for (
       let index = 0;
-      index < sliceCells && cells.length < totalCells;
+      index < sliceCells && cells.length < TOTAL_CELLS;
       index++
     ) {
       cells.push(slice.color);
@@ -66,11 +80,11 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
     0,
     Math.round(autocompactBufferTokens / tokensPerCell),
   );
-  const freeCells = Math.max(0, totalCells - cells.length - bufferCells);
+  const freeCells = Math.max(0, TOTAL_CELLS - cells.length - bufferCells);
   for (let index = 0; index < freeCells; index++) cells.push(-1);
   for (
     let index = 0;
-    index < bufferCells && cells.length < totalCells;
+    index < bufferCells && cells.length < TOTAL_CELLS;
     index++
   ) {
     cells.push(-2);
@@ -104,8 +118,10 @@ export function renderContextLegend(snapshot: ContextSnapshot): string {
   lines.push(fg(COLORS.dim, "\x1b[3mEstimated usage by category\x1b[0m"));
   for (const slice of slices) {
     if (slice.tokens <= 0) continue;
+    const dot = fg(slice.color, "●");
+    const label = `${slice.icon} ${slice.name}`;
     const value = `${fmtTokens(slice.tokens)} tokens (${pct(slice.tokens, windowTokens)})`;
-    lines.push(`${fg(slice.color, "●")} ${slice.icon} ${slice.name}: ${value}`);
+    lines.push(`${dot} ${label}: ${value}`);
   }
 
   const free = Math.max(0, windowTokens - usedTokens - autocompactBufferTokens);
@@ -233,7 +249,9 @@ export function renderUsageView(tracker: UsageTracker): string {
     totals.cacheReadTokens + totals.cacheWriteTokens + totals.inputTokens;
 
   lines.push(bold(color(255, "  Usage Summary")));
-  lines.push(color(244, `  ${totals.steps} 步累计`));
+  lines.push(
+    color(244, `  ${totals.steps} 步累计 · ${fmtLocalTimestamp(new Date())}`),
+  );
   lines.push("");
   lines.push(
     `  ${color(111, "◎")} Input          ${fmtTokens(totals.inputTokens).padStart(8)} tokens`,

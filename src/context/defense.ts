@@ -4,11 +4,11 @@ import {
   toolResultOutputToText,
 } from "./tool-result-output.js";
 
-// ── Layer 1: Token Estimation ────────────────────────
-
 export class TokenTracker {
   private lastPreciseCount = 0;
   private pendingChars = 0;
+
+  constructor(private readonly contextWindowTokens: number) {}
 
   updateFromAPI(promptTokens: number): void {
     this.lastPreciseCount = promptTokens;
@@ -38,12 +38,10 @@ export class TokenTracker {
 
   get status(): { tokens: number; percent: number; needsAction: boolean } {
     const tokens = this.estimatedTokens;
-    const percent = Math.round((tokens / CONTEXT_WINDOW) * 100);
+    const percent = Math.round((tokens / this.contextWindowTokens) * 100);
     return { tokens, percent, needsAction: percent >= 75 };
   }
 }
-
-const CONTEXT_WINDOW = 200_000;
 
 function countMessageChars(message: ModelMessage): number {
   let chars = 0;
@@ -74,30 +72,29 @@ function countMessagesChars(messages: ModelMessage[]): number {
 
 export function estimateMessageTokens(messages: ModelMessage[]): number {
   const chars = countMessagesChars(messages);
-  // 4 chars per token, with 1.2x safety factor for Chinese
   return Math.ceil((chars / 4) * 1.2);
 }
-
-// ── Layer 2: Dynamic Tool Result Truncation ──────────
 
 interface TruncationConfig {
   maxSingleResult: number;
   contextBudgetChars: number;
 }
 
-const DEFAULT_TRUNCATION: TruncationConfig = {
-  maxSingleResult: Math.floor(CONTEXT_WINDOW * 0.5 * 2), // 50% of window, 2 chars/token
-  contextBudgetChars: Math.floor(CONTEXT_WINDOW * 0.75 * 4), // 75% of window, 4 chars/token
-};
+function createTruncationConfig(contextWindowTokens: number): TruncationConfig {
+  return {
+    maxSingleResult: Math.floor(contextWindowTokens * 0.5 * 2),
+    contextBudgetChars: Math.floor(contextWindowTokens * 0.75 * 4),
+  };
+}
 
 export function truncateToolResults(
   messages: ModelMessage[],
-  config: TruncationConfig = DEFAULT_TRUNCATION,
+  contextWindowTokens: number,
+  config: TruncationConfig = createTruncationConfig(contextWindowTokens),
 ): { messages: ModelMessage[]; truncated: number; compacted: number } {
   let truncated = 0;
   let compacted = 0;
 
-  // Pass 1: single-result truncation (Head/Tail 60/40)
   const result = messages.map((msg) => {
     if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
 
@@ -124,7 +121,6 @@ export function truncateToolResults(
     return { ...msg, content: newContent };
   });
 
-  // Pass 2: total budget enforcement — compact oldest tool results first
   let totalChars = result.reduce((sum, msg) => {
     if (typeof msg.content === "string") return sum + msg.content.length;
     if (Array.isArray(msg.content)) {
@@ -175,8 +171,6 @@ export function truncateToolResults(
   return { messages: result, truncated, compacted };
 }
 
-// ── Layer 3: TTL Pruning ─────────────────────────────
-
 interface TTLConfig {
   softTTLMs: number;
   hardTTLMs: number;
@@ -184,9 +178,9 @@ interface TTLConfig {
 }
 
 const DEFAULT_TTL: TTLConfig = {
-  softTTLMs: 5 * 60 * 1000, // 5 minutes
-  hardTTLMs: 10 * 60 * 1000, // 10 minutes
-  keepHeadTail: 1500, // chars to keep in soft prune
+  softTTLMs: 5 * 60 * 1000,
+  hardTTLMs: 10 * 60 * 1000,
+  keepHeadTail: 1500,
 };
 
 export interface PruneResult {
@@ -205,7 +199,6 @@ export function ttlPrune(
   let hardPruned = 0;
 
   const result = messages.map((msg, idx) => {
-    // Only prune tool results, never user/assistant messages
     if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
 
     const ts = timestamps.get(idx);
@@ -213,7 +206,6 @@ export function ttlPrune(
 
     const age = now - ts;
 
-    // Preserve error experiences — never prune failed tool results
     const outputText = (msg.content as any[])
       .map((p: any) => (p.output ? toolResultOutputToText(p.output) : ""))
       .join("");
@@ -222,7 +214,6 @@ export function ttlPrune(
     );
     if (isError) return msg;
 
-    // Hard clear: replace entire content with placeholder
     if (age >= config.hardTTLMs) {
       hardPruned++;
       const toolName = (msg.content[0] as any)?.toolName || "unknown";
@@ -235,7 +226,6 @@ export function ttlPrune(
       };
     }
 
-    // Soft prune: keep head + tail, replace middle
     if (age >= config.softTTLMs) {
       const newContent = msg.content.map((part: any) => {
         if (!part.output) return part;
@@ -263,8 +253,6 @@ export function ttlPrune(
   return { messages: result, softPruned, hardPruned };
 }
 
-// ── Combined Defense ─────────────────────────────────
-
 export interface DefenseResult {
   messages: ModelMessage[];
   tokenEstimate: number;
@@ -277,16 +265,14 @@ export interface DefenseResult {
 export function applyDefense(
   messages: ModelMessage[],
   timestamps: Map<number, number>,
+  contextWindowTokens: number,
 ): DefenseResult {
-  // Layer 2: truncate oversized tool results
-  const trunc = truncateToolResults(messages);
+  const trunc = truncateToolResults(messages, contextWindowTokens);
   let result = trunc.messages;
 
-  // Layer 3: TTL prune old tool results
   const prune = ttlPrune(result, timestamps);
   result = prune.messages;
 
-  // Layer 1: estimate final token count
   const tokenEstimate = estimateMessageTokens(result);
 
   return {

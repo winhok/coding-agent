@@ -5,7 +5,7 @@ import { TokenTracker } from "./defense.js";
 import { textToolResultOutput } from "./tool-result-output.js";
 
 test("TokenTracker combines an API baseline with new structured messages", () => {
-  const tracker = new TokenTracker();
+  const tracker = new TokenTracker(1_000_000);
   tracker.updateFromAPI(1_000);
 
   const messages: ModelMessage[] = [
@@ -29,7 +29,7 @@ test("TokenTracker combines an API baseline with new structured messages", () =>
 });
 
 test("TokenTracker keeps its precise baseline when defense replaces content", () => {
-  const tracker = new TokenTracker();
+  const tracker = new TokenTracker(1_000_000);
   tracker.updateFromAPI(1_000);
 
   const before: ModelMessage[] = [{ role: "user", content: "12345678" }];

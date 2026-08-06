@@ -8,53 +8,45 @@ import {
 import {
   computeCost,
   normalizeUsage,
+  promptTokensFromUsage,
   UsageTracker,
 } from "../src/usage/tracker.ts";
 
 describe("usage tracking", () => {
   it("normalizes AI SDK 7 cache usage", () => {
-    assert.deepEqual(
-      normalizeUsage({
-        inputTokens: 100,
-        outputTokens: 10,
-        inputTokenDetails: {
-          noCacheTokens: 60,
-          cacheReadTokens: 30,
-          cacheWriteTokens: 10,
-        },
-        outputTokenDetails: { textTokens: 10, reasoningTokens: 0 },
-        totalTokens: 110,
-      }),
-      {
-        inputTokens: 60,
-        outputTokens: 10,
+    const usage = normalizeUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      inputTokenDetails: {
+        noCacheTokens: 60,
         cacheReadTokens: 30,
         cacheWriteTokens: 10,
       },
-    );
+      outputTokenDetails: { textTokens: 10, reasoningTokens: 0 },
+      totalTokens: 110,
+    });
+
+    assert.deepEqual(usage, {
+      inputTokens: 60,
+      outputTokens: 10,
+      cacheReadTokens: 30,
+      cacheWriteTokens: 10,
+    });
+    assert.equal(promptTokensFromUsage(usage), 100);
   });
 
-  it("keeps the previous cache savings when no-cache simulation is enabled", () => {
+  it("tracks actual cache usage and savings", () => {
     const tracker = new UsageTracker();
-    tracker.record("claude-haiku-4-5", {
-      inputTokens: 100,
-      outputTokens: 10,
-      cacheReadTokens: 100,
-      cacheWriteTokens: 0,
-    });
-    const savedBefore = tracker.totals().savedCost;
-
-    tracker.setCacheEnabled(false);
-    const simulatedMiss = tracker.record("claude-haiku-4-5", {
+    const record = tracker.record("claude-haiku-4-5", {
       inputTokens: 100,
       outputTokens: 10,
       cacheReadTokens: 100,
       cacheWriteTokens: 0,
     });
 
-    assert.equal(simulatedMiss.inputTokens, 200);
-    assert.equal(simulatedMiss.cacheReadTokens, 0);
-    assert.ok(Math.abs(tracker.totals().savedCost - savedBefore) < 1e-12);
+    assert.equal(record.inputTokens, 100);
+    assert.equal(record.cacheReadTokens, 100);
+    assert.ok(tracker.totals().savedCost > 0);
   });
 
   it("prices the fixed Qwen snapshot with implicit cache rates", () => {

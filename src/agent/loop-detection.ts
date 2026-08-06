@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 export interface ToolCallRecord {
   toolName: string;
   argsHash: string;
-  resultHash?: string;
   timestamp: number;
 }
 
@@ -22,20 +21,17 @@ export type DetectionResult =
       message: string;
     };
 
-// --- 配置 ---
-
-const HISTORY_SIZE = 30; // 滑动窗口大小
-const WARNING_THRESHOLD = 5; // 警告阈值（演示用，生产环境通常是 10）
-const CRITICAL_THRESHOLD = 8; // 严重阈值（演示用，生产环境通常是 20）
-const BREAKER_THRESHOLD = 10; // 熔断阈值（演示用，生产环境通常是 30）
-
-// --- 指纹计算 ---
+const HISTORY_SIZE = 30;
+const WARNING_THRESHOLD = 10;
+const CRITICAL_THRESHOLD = 20;
+const BREAKER_THRESHOLD = 30;
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify((value as any)[k])}`).join(",")}}`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 
 function hash(input: string): string {
@@ -45,12 +41,6 @@ function hash(input: string): string {
 export function hashToolCall(toolName: string, params: unknown): string {
   return `${toolName}:${hash(stableStringify(params))}`;
 }
-
-export function hashResult(result: unknown): string {
-  return hash(stableStringify(result));
-}
-
-// --- 滑动窗口 ---
 
 const history: ToolCallRecord[] = [];
 
@@ -63,51 +53,8 @@ export function recordCall(toolName: string, params: unknown): void {
   if (history.length > HISTORY_SIZE) history.shift();
 }
 
-export function recordResult(
-  toolName: string,
-  params: unknown,
-  result: unknown,
-): void {
-  const argsHash = hashToolCall(toolName, params);
-  const resultH = hashResult(result);
-  for (let i = history.length - 1; i >= 0; i--) {
-    const r = history[i];
-    if (
-      r &&
-      r.toolName === toolName &&
-      r.argsHash === argsHash &&
-      !r.resultHash
-    ) {
-      r.resultHash = resultH;
-      break;
-    }
-  }
-}
-
 export function resetHistory(): void {
   history.length = 0;
-}
-
-// --- 检测器 ---
-
-function getNoProgressStreak(toolName: string, argsHash: string): number {
-  let streak = 0;
-  let lastResultHash: string | undefined;
-
-  for (let i = history.length - 1; i >= 0; i--) {
-    const r = history[i];
-    if (!r) continue;
-    if (r.toolName !== toolName || r.argsHash !== argsHash) continue;
-    if (!r.resultHash) continue;
-    if (!lastResultHash) {
-      lastResultHash = r.resultHash;
-      streak = 1;
-      continue;
-    }
-    if (r.resultHash !== lastResultHash) break;
-    streak++;
-  }
-  return streak;
 }
 
 function getPingPongCount(currentHash: string): number {
@@ -139,19 +86,16 @@ function getPingPongCount(currentHash: string): number {
   return 0;
 }
 
-// --- 主检测函数 ---
-
 export function detect(toolName: string, params: unknown): DetectionResult {
   const argsHash = hashToolCall(toolName, params);
-  const noProgress = getNoProgressStreak(toolName, argsHash);
 
-  if (noProgress >= BREAKER_THRESHOLD) {
+  if (history.length >= BREAKER_THRESHOLD) {
     return {
       stuck: true,
       level: "critical",
       detector: "global_circuit_breaker",
-      count: noProgress,
-      message: `[熔断] ${toolName} 已重复 ${noProgress} 次且无进展，强制停止`,
+      count: history.length,
+      message: `[熔断] 本轮工具调用已达到 ${history.length} 次，强制停止`,
     };
   }
 

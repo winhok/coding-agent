@@ -6,23 +6,16 @@ import {
   streamText,
 } from "ai";
 import type { ToolRegistry } from "../tools/registry.js";
-import { normalizeUsage, type UsageTracker } from "../usage/tracker.js";
 import {
-  detect,
-  recordCall,
-  recordResult,
-  resetHistory,
-} from "./loop-detection.js";
+  normalizeUsage,
+  type StepUsage,
+  type UsageTracker,
+} from "../usage/tracker.js";
+import { detect, recordCall, resetHistory } from "./loop-detection.js";
 import { calculateDelay, isRetryable, sleep } from "./retry.js";
 
-const MAX_STEPS = 15;
+const MAX_STEPS = 50;
 const MAX_RETRIES = 3;
-const TOKEN_BUDGET = 50000;
-
-export interface BudgetState {
-  used: number;
-  limit: number;
-}
 
 export async function agentLoop(
   model: LanguageModel,
@@ -30,9 +23,14 @@ export async function agentLoop(
   messages: ModelMessage[],
   system: string,
   tracker?: UsageTracker,
+  onStepUsage?: (
+    usage: StepUsage,
+    responseMessages: ModelMessage[],
+    needsFollowUp: boolean,
+  ) => void | Promise<void>,
 ) {
   let step = 0;
-  let totalTokens = 0;
+  const appendedMessages: ModelMessage[] = [];
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -42,7 +40,6 @@ export async function agentLoop(
     let hasToolCall = false;
     let fullText = "";
     let shouldBreak = false;
-    let lastToolCall: { name: string; input: unknown } | null = null;
     let stepResponse: LanguageModelResponseMetadata | undefined;
     let stepUsage: LanguageModelUsage | undefined;
 
@@ -67,7 +64,6 @@ export async function agentLoop(
 
             case "tool-call": {
               hasToolCall = true;
-              lastToolCall = { name: part.toolName, input: part.input };
               console.log(
                 `  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`,
               );
@@ -78,10 +74,12 @@ export async function agentLoop(
                 if (detection.level === "critical") {
                   shouldBreak = true;
                 } else {
-                  messages.push({
+                  const warningMessage: ModelMessage = {
                     role: "user" as const,
                     content: `[系统提醒] ${detection.message}。请换一个思路解决问题，不要重复同样的操作。`,
-                  });
+                  };
+                  messages.push(warningMessage);
+                  appendedMessages.push(warningMessage);
                 }
               }
               recordCall(part.toolName, part.input);
@@ -96,13 +94,6 @@ export async function agentLoop(
               const preview =
                 output.length > 120 ? `${output.slice(0, 120)}...` : output;
               console.log(`  [结果: ${part.toolName}] ${preview}`);
-              if (lastToolCall) {
-                recordResult(
-                  lastToolCall.name,
-                  lastToolCall.input,
-                  part.output,
-                );
-              }
               break;
             }
           }
@@ -122,7 +113,6 @@ export async function agentLoop(
         hasToolCall = false;
         fullText = "";
         shouldBreak = false;
-        lastToolCall = null;
       }
     }
     if (shouldBreak) {
@@ -136,16 +126,14 @@ export async function agentLoop(
       );
     }
 
-    messages.push(...stepResponse.messages);
+    const responseMessages = stepResponse.messages;
+    messages.push(...responseMessages);
+    appendedMessages.push(...responseMessages);
 
     const modelId = typeof model === "string" ? model : model.modelId;
     const norm = normalizeUsage(stepUsage);
     const stepRecord = tracker?.record(modelId, norm);
-    totalTokens +=
-      norm.inputTokens +
-      norm.outputTokens +
-      norm.cacheReadTokens +
-      norm.cacheWriteTokens;
+    await onStepUsage?.(norm, responseMessages, hasToolCall);
 
     if (
       stepRecord &&
@@ -163,16 +151,6 @@ export async function agentLoop(
         `  [${tag}] ${detail} tokens · 本步 ${currency}${stepRecord.cost.toFixed(5)}`,
       );
     }
-    if (totalTokens > TOKEN_BUDGET * 0.9) {
-      console.log(
-        `  [Token] ${totalTokens}/${TOKEN_BUDGET} (${Math.round((totalTokens / TOKEN_BUDGET) * 100)}%)`,
-      );
-    }
-    if (totalTokens > TOKEN_BUDGET) {
-      console.log("\n[Token 预算耗尽]");
-      break;
-    }
-
     if (!hasToolCall) {
       if (fullText) console.log();
       break;
@@ -183,4 +161,5 @@ export async function agentLoop(
   if (step >= MAX_STEPS) {
     console.log("\n[达到最大步数]");
   }
+  return appendedMessages;
 }

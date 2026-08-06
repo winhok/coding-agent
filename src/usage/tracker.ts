@@ -121,13 +121,13 @@ function getModelPricing(model: string): ModelPricing {
   return pricing;
 }
 
-function inputLikeTokens(usage: StepUsage): number {
+export function promptTokensFromUsage(usage: StepUsage): number {
   return usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 }
 
 function getTokenPricing(model: string, usage: StepUsage): TokenPricingTier {
   const pricing = getModelPricing(model);
-  const inputTokens = inputLikeTokens(usage);
+  const inputTokens = promptTokensFromUsage(usage);
   const tier = pricing.tiers.find(
     (candidate) =>
       candidate.upToInputTokens === undefined ||
@@ -156,23 +156,10 @@ export class UsageTracker {
   private steps: StepRecord[] = [];
   private logPath: string | undefined;
   private currency: PricingCurrency | undefined;
-  private cacheAccountingEnabled = true;
 
   constructor(logPath?: string) {
     this.logPath = logPath;
     if (logPath) mkdirSync(dirname(logPath), { recursive: true });
-  }
-
-  /**
-   * Qwen 的隐式缓存无法从请求侧强制关闭。关闭此开关时，只把后续命中的
-   * cache token 按普通 input 计价，方便用 /cache off 对比无缓存基线。
-   */
-  setCacheEnabled(enabled: boolean): void {
-    this.cacheAccountingEnabled = enabled;
-  }
-
-  get cacheEnabled(): boolean {
-    return this.cacheAccountingEnabled;
   }
 
   record(model: string, usage: StepUsage): StepRecord {
@@ -184,22 +171,13 @@ export class UsageTracker {
     }
     this.currency = pricing.currency;
 
-    const billableUsage = this.cacheAccountingEnabled
-      ? usage
-      : {
-          ...usage,
-          inputTokens:
-            usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        };
-    const cost = computeCost(model, billableUsage);
+    const cost = computeCost(model, usage);
     const record: StepRecord = {
       ts: Date.now(),
       model,
       cost,
       currency: pricing.currency,
-      ...billableUsage,
+      ...usage,
     };
     this.steps.push(record);
 
@@ -237,7 +215,7 @@ export class UsageTracker {
       let c = 0;
       for (const s of this.steps) {
         const p = getTokenPricing(s.model, s);
-        const inputLike = inputLikeTokens(s);
+        const inputLike = promptTokensFromUsage(s);
         c += (inputLike * p.input) / 1_000_000;
         c += (s.outputTokens * p.output) / 1_000_000;
       }

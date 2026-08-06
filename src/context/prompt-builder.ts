@@ -1,3 +1,5 @@
+import type { MemoryStore } from "../memory/store.js";
+
 export interface PromptContext {
   toolCount: number;
   deferredToolSummary: string;
@@ -62,6 +64,12 @@ export function deferredTools(): PipeFn {
     if (!ctx.deferredToolSummary) return null;
     return `如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。${ctx.deferredToolSummary}`;
   };
+}
+
+export function memoryContext(
+  memoryStore: Pick<MemoryStore, "buildPromptSection">,
+): PipeFn {
+  return () => memoryStore.buildPromptSection();
 }
 
 export function sessionContext(): PipeFn {
