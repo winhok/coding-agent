@@ -20,6 +20,7 @@ export interface CommandContext {
   model: LanguageModel;
   makePromptCtx: () => PromptContext;
   ask: () => void;
+  runUserTurn: (message: ModelMessage) => void;
   replaceMessages: (messages: ModelMessage[]) => void;
   memoryStore: MemoryStore;
   vectorStore?: SqliteVectorStore;

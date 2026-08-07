@@ -434,6 +434,82 @@ export async function startAgent(): Promise<void> {
     return true;
   }
 
+  async function executeUserTurn(userMsg: ModelMessage): Promise<void> {
+    messages.push(userMsg);
+    tokenTracker.addMessage(userMsg);
+    timestamps.set(messages.length - 1, Date.now());
+    store.append(userMsg);
+
+    const turnDefense = applyDefense(
+      messages,
+      timestamps,
+      MODEL_CONFIG.effectiveContextWindowTokens,
+    );
+    replaceMessages(turnDefense.messages);
+    await compactIfNeeded();
+
+    const currentSystem = builder.build(makePromptCtx());
+    const trace = await LocalTraceRecorder.start({
+      sessionId: config.session.id,
+      model: model.modelId || config.model.name,
+    });
+    let newMessages: ModelMessage[];
+    try {
+      const result = await agentLoop({
+        model,
+        registry,
+        messages,
+        system: currentSystem,
+        tracker,
+        onStepUsage: async (usage, responseMessages, needsFollowUp) => {
+          const promptTokens = promptTokensFromUsage(usage);
+          if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
+          tokenTracker.addMessages(responseMessages);
+          const responseStart = messages.length - responseMessages.length;
+          const now = Date.now();
+          for (let index = responseStart; index < messages.length; index++) {
+            timestamps.set(index, now);
+          }
+          if (needsFollowUp) await compactIfNeeded();
+        },
+        eventSink: terminalAgentEventSink,
+        trace,
+        requestApproval,
+      });
+      newMessages = result.appendedMessages;
+      await trace.finish("completed");
+      console.log(`  [Trace] ${trace.filePath}`);
+    } catch (error) {
+      await trace.finish("failed", error);
+      console.error(
+        `  [Agent] ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+
+    const now = Date.now();
+    for (const message of newMessages) {
+      const index = messages.indexOf(message);
+      if (index >= 0 && !timestamps.has(index)) timestamps.set(index, now);
+    }
+    store.appendAll(newMessages);
+
+    const status = tokenTracker.status;
+    console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
+
+    await compactIfNeeded();
+  }
+
+  function runUserTurn(userMsg: ModelMessage): void {
+    void executeUserTurn(userMsg)
+      .catch((error) => {
+        console.error(
+          `  [Turn] ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(ask);
+  }
+
   function ask() {
     rl.question("\nYou: ", async (input) => {
       const trimmed = input.trim();
@@ -462,6 +538,7 @@ export async function startAgent(): Promise<void> {
         model,
         makePromptCtx,
         ask,
+        runUserTurn,
         replaceMessages,
         memoryStore,
         ...(vectorStore ? { vectorStore } : {}),
@@ -481,72 +558,7 @@ export async function startAgent(): Promise<void> {
       }
 
       const userMsg: ModelMessage = { role: "user", content: trimmed };
-      messages.push(userMsg);
-      tokenTracker.addMessage(userMsg);
-      timestamps.set(messages.length - 1, Date.now());
-      store.append(userMsg);
-
-      const turnDefense = applyDefense(
-        messages,
-        timestamps,
-        MODEL_CONFIG.effectiveContextWindowTokens,
-      );
-      replaceMessages(turnDefense.messages);
-      await compactIfNeeded();
-
-      const currentSystem = builder.build(makePromptCtx());
-      const trace = await LocalTraceRecorder.start({
-        sessionId: config.session.id,
-        model: model.modelId || config.model.name,
-      });
-      let newMessages: ModelMessage[];
-      try {
-        const result = await agentLoop({
-          model,
-          registry,
-          messages,
-          system: currentSystem,
-          tracker,
-          onStepUsage: async (usage, responseMessages, needsFollowUp) => {
-            const promptTokens = promptTokensFromUsage(usage);
-            if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
-            tokenTracker.addMessages(responseMessages);
-            const responseStart = messages.length - responseMessages.length;
-            const now = Date.now();
-            for (let index = responseStart; index < messages.length; index++) {
-              timestamps.set(index, now);
-            }
-            if (needsFollowUp) await compactIfNeeded();
-          },
-          eventSink: terminalAgentEventSink,
-          trace,
-          requestApproval,
-        });
-        newMessages = result.appendedMessages;
-        await trace.finish("completed");
-        console.log(`  [Trace] ${trace.filePath}`);
-      } catch (error) {
-        await trace.finish("failed", error);
-        console.error(
-          `  [Agent] ${error instanceof Error ? error.message : String(error)}`,
-        );
-        ask();
-        return;
-      }
-
-      const now = Date.now();
-      for (const message of newMessages) {
-        const index = messages.indexOf(message);
-        if (index >= 0 && !timestamps.has(index)) timestamps.set(index, now);
-      }
-      store.appendAll(newMessages);
-
-      const status = tokenTracker.status;
-      console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
-
-      await compactIfNeeded();
-
-      ask();
+      runUserTurn(userMsg);
     });
   }
 

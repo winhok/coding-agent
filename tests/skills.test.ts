@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import type { ModelMessage } from "ai";
 import type { CommandContext } from "../src/commands/index.ts";
 import { createSkillCommands } from "../src/commands/skill.ts";
 import { SkillLoader } from "../src/skills/loader.ts";
@@ -97,6 +98,35 @@ describe("skill commands", () => {
           false,
         );
       });
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("delegates explicit skills to the shared user turn runner", async () => {
+    const dir = makeTempDir("coding-agent-skills-");
+    try {
+      writeSkill(dir, "code-review", "审查代码");
+      const loader = new SkillLoader(dir);
+      loader.load();
+      const [, run] = createSkillCommands(loader);
+      assert.ok(run);
+
+      const submitted: ModelMessage[] = [];
+      const ctx = {
+        runUserTurn(message: ModelMessage) {
+          submitted.push(message);
+        },
+      } as unknown as CommandContext;
+
+      const handled = await withMutedConsole(() =>
+        run("/code-review 检查 src/rag", ctx),
+      );
+
+      assert.equal(handled, "async");
+      assert.equal(submitted.length, 1);
+      assert.equal(submitted[0]?.role, "user");
+      assert.match(String(submitted[0]?.content), /用户指令: 检查 src\/rag/);
     } finally {
       cleanupTempDir(dir);
     }

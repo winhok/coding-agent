@@ -1,6 +1,4 @@
 import type { ModelMessage } from "ai";
-import { agentLoop } from "../agent/loop.js";
-import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import type { SkillLoader } from "../skills/loader.js";
 import type { CommandHandler } from "./index.js";
 
@@ -45,27 +43,7 @@ export function createSkillCommands(
       const content = skillLoader.buildSkillContent(skill, args.join(" "));
 
       const userMessage: ModelMessage = { role: "user", content };
-      ctx.messages.push(userMessage);
-      ctx.timestamps.set(ctx.messages.length - 1, Date.now());
-      ctx.sessionStore.append(userMessage);
-
-      const currentSystem = ctx.builder.build(ctx.makePromptCtx());
-      agentLoop({
-        model: ctx.model,
-        registry: ctx.registry,
-        messages: ctx.messages,
-        system: currentSystem,
-        tracker: ctx.tracker,
-        eventSink: terminalAgentEventSink,
-      }).then(({ appendedMessages }) => {
-        const now = Date.now();
-        for (const message of appendedMessages) {
-          const index = ctx.messages.indexOf(message);
-          if (index >= 0) ctx.timestamps.set(index, now);
-        }
-        ctx.sessionStore.appendAll(appendedMessages);
-        ctx.ask();
-      });
+      ctx.runUserTurn(userMessage);
 
       return "async";
     },
