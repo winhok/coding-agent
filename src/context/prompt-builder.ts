@@ -1,5 +1,3 @@
-import type { MemoryStore } from "../memory/store.js";
-
 export interface PromptContext {
   toolCount: number;
   deferredToolSummary: string;
@@ -9,6 +7,15 @@ export interface PromptContext {
 
 type PipeFn = (ctx: PromptContext) => string | null;
 
+export interface PromptSection {
+  name: string;
+  text: string;
+}
+
+export function renderPromptSections(sections: PromptSection[]): string {
+  return sections.map((section) => section.text).join("\n\n");
+}
+
 export class PromptBuilder {
   private pipes: Array<{ name: string; fn: PipeFn }> = [];
 
@@ -17,17 +24,17 @@ export class PromptBuilder {
     return this;
   }
 
-  build(ctx: PromptContext): string {
-    const sections: string[] = [];
-
-    for (const { fn } of this.pipes) {
-      const result = fn(ctx);
-      if (result !== null) {
-        sections.push(result);
-      }
+  buildSections(ctx: PromptContext): PromptSection[] {
+    const sections: PromptSection[] = [];
+    for (const { name, fn } of this.pipes) {
+      const text = fn(ctx);
+      if (text !== null) sections.push({ name, text });
     }
+    return sections;
+  }
 
-    return sections.join("\n\n");
+  build(ctx: PromptContext): string {
+    return renderPromptSections(this.buildSections(ctx));
   }
 
   debug(ctx: PromptContext): void {
@@ -40,8 +47,6 @@ export class PromptBuilder {
     console.log("========================\n");
   }
 }
-
-// ── 预定义的 Pipe ────────────────────────────────
 
 export function coreRules(): PipeFn {
   return () => `你是 Super Agent，一个有工具调用能力的 AI 助手。
@@ -64,12 +69,6 @@ export function deferredTools(): PipeFn {
     if (!ctx.deferredToolSummary) return null;
     return `如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。${ctx.deferredToolSummary}`;
   };
-}
-
-export function memoryContext(
-  memoryStore: Pick<MemoryStore, "buildPromptSection">,
-): PipeFn {
-  return () => memoryStore.buildPromptSection();
 }
 
 export function sessionContext(): PipeFn {

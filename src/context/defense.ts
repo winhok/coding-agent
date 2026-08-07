@@ -5,7 +5,7 @@ import {
 } from "./tool-result-output.js";
 
 export class TokenTracker {
-  private lastPreciseCount = 0;
+  private lastPreciseCount: number | null = null;
   private pendingChars = 0;
 
   constructor(private readonly contextWindowTokens: number) {}
@@ -32,8 +32,15 @@ export class TokenTracker {
   get estimatedTokens(): number {
     return Math.max(
       0,
-      this.lastPreciseCount + Math.ceil(this.pendingChars / 4),
+      (this.lastPreciseCount ?? 0) + Math.ceil(this.pendingChars / 4),
     );
+  }
+
+  get measurement(): TokenMeasurement {
+    return {
+      observedPromptTokens: this.lastPreciseCount,
+      pendingEstimatedTokens: Math.ceil(this.pendingChars / 4),
+    };
   }
 
   get status(): { tokens: number; percent: number; needsAction: boolean } {
@@ -41,6 +48,11 @@ export class TokenTracker {
     const percent = Math.round((tokens / this.contextWindowTokens) * 100);
     return { tokens, percent, needsAction: percent >= 75 };
   }
+}
+
+export interface TokenMeasurement {
+  observedPromptTokens: number | null;
+  pendingEstimatedTokens: number;
 }
 
 function countMessageChars(message: ModelMessage): number {

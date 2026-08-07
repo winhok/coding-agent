@@ -1,3 +1,4 @@
+import { renderPromptSections } from "../context/prompt-builder.js";
 import {
   buildContextSnapshot,
   renderContextView,
@@ -8,13 +9,17 @@ import type { CommandHandler } from "./index.js";
 export const contextCommands: CommandHandler[] = [
   (cmd, ctx) => {
     if (cmd !== "/context") return false;
-    const SYSTEM = ctx.builder.build(ctx.makePromptCtx());
-    const memoryChars = ctx.memoryStore.buildPromptSection().length;
+    const sections = ctx.builder.buildSections(ctx.makePromptCtx());
+    const system = renderPromptSections(sections);
+    const memoryChars = sectionChars(sections, "memoryContext");
+    const ragChars = sectionChars(sections, "ragContext");
     const snapshot = buildContextSnapshot({
       modelName: ctx.modelName,
       modelId: ctx.modelId,
       windowTokens: ctx.contextWindowTokens,
-      systemPromptChars: Math.max(0, SYSTEM.length - memoryChars),
+      effectiveWindowTokens: ctx.effectiveContextWindowTokens,
+      autocompactThresholdTokens: ctx.autocompactThresholdTokens,
+      systemPromptChars: Math.max(0, system.length - memoryChars - ragChars),
       toolDescriptionChars: ctx.registry
         .getActiveTools()
         .reduce(
@@ -28,10 +33,10 @@ export const contextCommands: CommandHandler[] = [
           0,
         ),
       memoryChars,
+      ragChars,
       skillsChars: 0,
       messages: ctx.messages,
-      autocompactBufferTokens:
-        ctx.contextWindowTokens - ctx.autocompactThresholdTokens,
+      tokenMeasurement: ctx.tokenMeasurement,
     });
     console.log(renderContextView(snapshot));
     return true;
@@ -52,3 +57,12 @@ export const contextCommands: CommandHandler[] = [
     return true;
   },
 ];
+
+function sectionChars(
+  sections: Array<{ name: string; text: string }>,
+  name: string,
+): number {
+  return sections
+    .filter((section) => section.name === name)
+    .reduce((total, section) => total + section.text.length, 0);
+}

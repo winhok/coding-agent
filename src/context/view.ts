@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import type { UsageTracker } from "../usage/tracker.js";
+import type { TokenMeasurement } from "./defense.js";
 
 export interface ContextSlice {
   name: string;
@@ -12,9 +13,13 @@ export interface ContextSnapshot {
   modelName: string;
   modelId: string;
   windowTokens: number;
+  effectiveWindowTokens: number;
   usedTokens: number;
+  estimatedBreakdownTokens: number;
   slices: ContextSlice[];
-  autocompactBufferTokens: number;
+  autocompactReserveTokens: number;
+  safetyReserveTokens: number;
+  tokenMeasurement: TokenMeasurement;
 }
 
 const COLORS = {
@@ -25,6 +30,7 @@ const COLORS = {
   messages: 111,
   free: 240,
   buffer: 244,
+  safety: 208,
   text: 255,
   dim: 244,
 };
@@ -59,7 +65,12 @@ function fmtLocalTimestamp(date: Date): string {
 }
 
 export function renderContextMatrix(snapshot: ContextSnapshot): string {
-  const { windowTokens, slices, autocompactBufferTokens } = snapshot;
+  const {
+    windowTokens,
+    slices,
+    autocompactReserveTokens,
+    safetyReserveTokens,
+  } = snapshot;
   const TOTAL_CELLS = 256;
   const tokensPerCell = windowTokens / TOTAL_CELLS;
   const cells: number[] = [];
@@ -78,9 +89,16 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
 
   const bufferCells = Math.max(
     0,
-    Math.round(autocompactBufferTokens / tokensPerCell),
+    Math.round(autocompactReserveTokens / tokensPerCell),
   );
-  const freeCells = Math.max(0, TOTAL_CELLS - cells.length - bufferCells);
+  const safetyCells = Math.max(
+    0,
+    Math.round(safetyReserveTokens / tokensPerCell),
+  );
+  const freeCells = Math.max(
+    0,
+    TOTAL_CELLS - cells.length - bufferCells - safetyCells,
+  );
   for (let index = 0; index < freeCells; index++) cells.push(-1);
   for (
     let index = 0;
@@ -88,6 +106,13 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
     index++
   ) {
     cells.push(-2);
+  }
+  for (
+    let index = 0;
+    index < safetyCells && cells.length < TOTAL_CELLS;
+    index++
+  ) {
+    cells.push(-3);
   }
 
   const lines: string[] = [];
@@ -97,6 +122,7 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
       const color = cells[row * 16 + column];
       if (color === -1) rowCells.push(fg(COLORS.free, "○"));
       else if (color === -2) rowCells.push(fg(COLORS.buffer, "▢"));
+      else if (color === -3) rowCells.push(fg(COLORS.safety, "▧"));
       else rowCells.push(fg(color ?? COLORS.free, "●"));
     }
     lines.push(rowCells.join(" "));
@@ -105,17 +131,43 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
 }
 
 export function renderContextLegend(snapshot: ContextSnapshot): string {
-  const { slices, autocompactBufferTokens, windowTokens, usedTokens } =
-    snapshot;
+  const {
+    slices,
+    autocompactReserveTokens,
+    safetyReserveTokens,
+    windowTokens,
+    effectiveWindowTokens,
+    usedTokens,
+    estimatedBreakdownTokens,
+    tokenMeasurement,
+  } = snapshot;
   const lines: string[] = [];
 
   lines.push(`\x1b[1m${fg(COLORS.text, snapshot.modelName)}\x1b[0m`);
   lines.push(fg(COLORS.dim, snapshot.modelId));
   lines.push(
-    `${fmtTokens(usedTokens)}/${fmtTokens(windowTokens)} tokens (${pct(usedTokens, windowTokens)})`,
+    `${fmtTokens(usedTokens)}/${fmtTokens(effectiveWindowTokens)} effective tokens (${pct(usedTokens, effectiveWindowTokens)})`,
   );
+  lines.push(`Nominal window: ${fmtTokens(windowTokens)} tokens`);
+  if (tokenMeasurement.observedPromptTokens === null) {
+    lines.push(fg(COLORS.dim, "Measurement: local estimate"));
+  } else {
+    const pending = tokenMeasurement.pendingEstimatedTokens;
+    const pendingLabel = `${pending >= 0 ? "+" : ""}${fmtTokens(pending)}`;
+    lines.push(
+      fg(
+        COLORS.dim,
+        `Measurement: API ${fmtTokens(tokenMeasurement.observedPromptTokens)} ${pendingLabel} pending estimate`,
+      ),
+    );
+  }
   lines.push("");
-  lines.push(fg(COLORS.dim, "\x1b[3mEstimated usage by category\x1b[0m"));
+  lines.push(
+    fg(
+      COLORS.dim,
+      `\x1b[3mEstimated breakdown (~${fmtTokens(estimatedBreakdownTokens)} total)\x1b[0m`,
+    ),
+  );
   for (const slice of slices) {
     if (slice.tokens <= 0) continue;
     const dot = fg(slice.color, "●");
@@ -124,12 +176,17 @@ export function renderContextLegend(snapshot: ContextSnapshot): string {
     lines.push(`${dot} ${label}: ${value}`);
   }
 
-  const free = Math.max(0, windowTokens - usedTokens - autocompactBufferTokens);
+  const autocompactThresholdTokens =
+    effectiveWindowTokens - autocompactReserveTokens;
+  const free = Math.max(0, autocompactThresholdTokens - usedTokens);
   lines.push(
-    `${fg(COLORS.free, "○")}  Free space: ${fmtTokens(free)} (${pct(free, windowTokens)})`,
+    `${fg(COLORS.free, "○")}  Free before autocompact: ${fmtTokens(free)} (${pct(free, windowTokens)})`,
   );
   lines.push(
-    `${fg(COLORS.buffer, "▢")}  Autocompact buffer: ${fmtTokens(autocompactBufferTokens)} (${pct(autocompactBufferTokens, windowTokens)})`,
+    `${fg(COLORS.buffer, "▢")}  Autocompact reserve: ${fmtTokens(autocompactReserveTokens)} (${pct(autocompactReserveTokens, windowTokens)})`,
+  );
+  lines.push(
+    `${fg(COLORS.safety, "▧")}  Safety reserve: ${fmtTokens(safetyReserveTokens)} (${pct(safetyReserveTokens, windowTokens)})`,
   );
   return lines.join("\n");
 }
@@ -150,12 +207,15 @@ export interface BuildSnapshotInput {
   modelName: string;
   modelId: string;
   windowTokens: number;
+  effectiveWindowTokens: number;
+  autocompactThresholdTokens: number;
   systemPromptChars: number;
   toolDescriptionChars: number;
   memoryChars: number;
+  ragChars: number;
   skillsChars: number;
   messages: ModelMessage[];
-  autocompactBufferTokens?: number;
+  tokenMeasurement: TokenMeasurement;
 }
 
 const CHARS_PER_TOKEN = 3.5;
@@ -215,6 +275,12 @@ export function buildContextSnapshot(
       icon: "◈",
     },
     {
+      name: "RAG",
+      tokens: approxTokensFromChars(input.ragChars),
+      color: 214,
+      icon: "◐",
+    },
+    {
       name: "Skills",
       tokens: approxTokensFromChars(input.skillsChars),
       color: COLORS.skills,
@@ -227,15 +293,33 @@ export function buildContextSnapshot(
       icon: "◎",
     },
   ];
-  const usedTokens = slices.reduce((total, slice) => total + slice.tokens, 0);
+  const estimatedBreakdownTokens = slices.reduce(
+    (total, slice) => total + slice.tokens,
+    0,
+  );
+  const measuredTokens =
+    input.tokenMeasurement.observedPromptTokens === null
+      ? estimatedBreakdownTokens
+      : input.tokenMeasurement.observedPromptTokens +
+        input.tokenMeasurement.pendingEstimatedTokens;
+  const usedTokens = Math.max(0, measuredTokens);
   return {
     modelName: input.modelName,
     modelId: input.modelId,
     windowTokens: input.windowTokens,
+    effectiveWindowTokens: input.effectiveWindowTokens,
     usedTokens,
+    estimatedBreakdownTokens,
     slices,
-    autocompactBufferTokens:
-      input.autocompactBufferTokens ?? Math.round(input.windowTokens * 0.05),
+    autocompactReserveTokens: Math.max(
+      0,
+      input.effectiveWindowTokens - input.autocompactThresholdTokens,
+    ),
+    safetyReserveTokens: Math.max(
+      0,
+      input.windowTokens - input.effectiveWindowTokens,
+    ),
+    tokenMeasurement: input.tokenMeasurement,
   };
 }
 

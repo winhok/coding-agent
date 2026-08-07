@@ -1,4 +1,5 @@
 import "dotenv/config";
+import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
@@ -6,6 +7,7 @@ import { agentLoop } from "./agent/loop.ts";
 import { contextCommands } from "./commands/context.js";
 import { type CommandContext, createDispatcher } from "./commands/index.js";
 import { memoryCommands } from "./commands/memory.js";
+import { ragCommands } from "./commands/rag.js";
 import {
   estimateTokens,
   microcompact,
@@ -15,17 +17,21 @@ import { applyDefense, TokenTracker } from "./context/defense.js";
 import {
   coreRules,
   deferredTools,
-  memoryContext,
   PromptBuilder,
   type PromptContext,
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder.js";
+import { memoryContext, ragContext } from "./context/prompt-pipes.js";
 import { MemoryStore } from "./memory/store.js";
+import { createDashScopeEmbedder, createMockEmbedder } from "./rag/embedder.js";
+import { importDocuments } from "./rag/ingest.js";
+import { SqliteVectorStore } from "./rag/sqlite-store.js";
 import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
 import { createMemoryTool } from "./tools/memory-tools.js";
+import { createRagTools } from "./tools/rag-tools.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
 import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
@@ -61,6 +67,12 @@ const memoryStore = new MemoryStore(".");
 memoryStore.init();
 registry.register(createMemoryTool(memoryStore));
 
+const vectorStore = new SqliteVectorStore("knowledge.db");
+const embedFn = process.env.DASHSCOPE_API_KEY
+  ? createDashScopeEmbedder(process.env.DASHSCOPE_API_KEY)
+  : createMockEmbedder();
+registry.register(...createRagTools(vectorStore, embedFn));
+
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
 export async function connectMCP(targetRegistry = registry) {
@@ -89,7 +101,34 @@ export async function connectMCP(targetRegistry = registry) {
   }
 }
 
-const dispatch = createDispatcher([...contextCommands, ...memoryCommands]);
+const dispatch = createDispatcher([
+  ...contextCommands,
+  ...memoryCommands,
+  ...ragCommands,
+]);
+
+async function importNewDocuments(): Promise<void> {
+  if (!fs.existsSync("docs")) return;
+
+  const files = fs
+    .readdirSync("docs")
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => `docs/${file}`);
+
+  if (files.length === 0) return;
+
+  console.log(`  发现 ${files.length} 个候选文档，检查知识库更新...`);
+  const summary = await importDocuments(files, vectorStore, embedFn);
+  for (const result of summary.imported) {
+    console.log(`    ${result.source} → ${result.chunks} 个片段`);
+  }
+  for (const failure of summary.failed) {
+    console.log(`    ${failure.source} → 导入失败: ${failure.error}`);
+  }
+  console.log(
+    `  知识库就绪：导入 ${summary.imported.length}，跳过 ${summary.skipped.length}，失败 ${summary.failed.length}，共 ${vectorStore.size()} 个片段\n`,
+  );
+}
 
 async function main() {
   await connectMCP();
@@ -108,7 +147,8 @@ async function main() {
     .pipe("coreRules", coreRules())
     .pipe("toolGuide", toolGuide())
     .pipe("deferredTools", deferredTools())
-    .pipe("memory", memoryContext(memoryStore))
+    .pipe("memoryContext", memoryContext(memoryStore))
+    .pipe("ragContext", ragContext(vectorStore))
     .pipe("sessionContext", sessionContext());
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -184,6 +224,7 @@ async function main() {
       if (trimmed === "/exit") {
         console.log("Bye!");
         await registry.closeAllMCP();
+        vectorStore.close();
         rl.close();
         return;
       }
@@ -204,11 +245,14 @@ async function main() {
         ask,
         replaceMessages,
         memoryStore,
+        vectorStore,
         modelName: MODEL_CONFIG.name,
         modelId: typeof model === "string" ? model : model.modelId,
         contextWindowTokens: MODEL_CONFIG.contextWindowTokens,
+        effectiveContextWindowTokens: MODEL_CONFIG.effectiveContextWindowTokens,
         autocompactThresholdTokens: AUTOCOMPACT_THRESHOLD_TOKENS,
         estimatedContextTokens: tokenTracker.estimatedTokens,
+        tokenMeasurement: tokenTracker.measurement,
       };
       const handled = dispatch(trimmed, ctx);
       if (handled === "async") return;
@@ -267,8 +311,10 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.11 — Memory System (type "/exit" to quit)');
+  console.log('Super Agent v0.12 — SQLite RAG (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /ingest <path>  — 导入文档到知识库");
+  console.log("  /rag            — 查看知识库状态");
   console.log("  /memory         — 查看所有记忆");
   console.log("  /memory search <关键词> — 搜索记忆");
   console.log("  /context        — 终端里看 context 占用矩阵");
@@ -279,6 +325,7 @@ async function main() {
   console.log(`  已加载 ${memoryStore.list().length} 条历史记忆`);
   console.log("");
 
+  await importNewDocuments();
   ask();
 }
 

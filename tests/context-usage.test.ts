@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  PromptBuilder,
+  renderPromptSections,
+} from "../src/context/prompt-builder.ts";
+import {
   buildContextSnapshot,
   renderContextMatrix,
+  renderContextView,
   renderUsageView,
 } from "../src/context/view.ts";
 import {
@@ -67,12 +72,18 @@ describe("context and usage views", () => {
       modelName: "Test Model",
       modelId: "test-model",
       windowTokens: 1_000_000,
+      effectiveWindowTokens: 950_000,
+      autocompactThresholdTokens: 200_000,
       systemPromptChars: 350,
       toolDescriptionChars: 700,
       memoryChars: 0,
+      ragChars: 0,
       skillsChars: 0,
       messages: [{ role: "user", content: "hello" }],
-      autocompactBufferTokens: 50_000,
+      tokenMeasurement: {
+        observedPromptTokens: null,
+        pendingEstimatedTokens: 0,
+      },
     });
     const rows = renderContextMatrix(snapshot).split("\n");
 
@@ -85,6 +96,58 @@ describe("context and usage views", () => {
       const cells = row.replaceAll(ansiPattern, "").split(" ");
       assert.equal(cells.length, 16);
     }
+  });
+
+  it("separates effective capacity and API measurement from estimated categories", () => {
+    const snapshot = buildContextSnapshot({
+      modelName: "Test Model",
+      modelId: "test-model",
+      windowTokens: 1_000_000,
+      effectiveWindowTokens: 950_000,
+      autocompactThresholdTokens: 200_000,
+      systemPromptChars: 350,
+      toolDescriptionChars: 700,
+      memoryChars: 35,
+      ragChars: 70,
+      skillsChars: 0,
+      messages: [],
+      tokenMeasurement: {
+        observedPromptTokens: 4_500,
+        pendingEstimatedTokens: 100,
+      },
+    });
+
+    assert.equal(snapshot.usedTokens, 4_600);
+    assert.equal(snapshot.autocompactReserveTokens, 750_000);
+    assert.equal(snapshot.safetyReserveTokens, 50_000);
+    assert.notEqual(snapshot.estimatedBreakdownTokens, snapshot.usedTokens);
+
+    const output = renderContextView(snapshot);
+    assert.match(output, /4\.6k\/950\.0k effective tokens/);
+    assert.match(output, /Nominal window: 1\.0M tokens/);
+    assert.match(output, /Measurement: API 4\.5k \+100 pending estimate/);
+    assert.match(output, /Autocompact reserve: 750\.0k/);
+    assert.match(output, /Safety reserve: 50\.0k/);
+  });
+
+  it("builds the sent prompt from the same named sections used for metering", () => {
+    const builder = new PromptBuilder()
+      .pipe("coreRules", () => "core")
+      .pipe("memoryContext", () => "memory")
+      .pipe("ragContext", () => null);
+    const context = {
+      toolCount: 0,
+      deferredToolSummary: "",
+      sessionMessageCount: 0,
+      sessionId: "test",
+    };
+    const sections = builder.buildSections(context);
+
+    assert.deepEqual(sections, [
+      { name: "coreRules", text: "core" },
+      { name: "memoryContext", text: "memory" },
+    ]);
+    assert.equal(builder.build(context), renderPromptSections(sections));
   });
 
   it("uses the tracker currency in the usage view", () => {

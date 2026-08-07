@@ -1,10 +1,15 @@
 allowBuilds:
+  better-sqlite3: true
   esbuild: true
   lefthook: true
 minimumReleaseAgeExclude:
-  - "@ai-sdk/gateway@4.0.37"
-  - ai@7.0.48
-  - tsx@4.23.4
+  - '@ai-sdk/gateway@4.0.37 || 4.0.43'
+  - ai@7.0.48 || 7.0.55
+  - tsx@4.23.4 || 4.23.9
+  - '@ai-sdk/anthropic@4.0.33'
+  - '@ai-sdk/openai@4.0.33'
+  - '@ai-sdk/provider-utils@5.0.23'
+  - '@ai-sdk/provider@4.0.6'
 onlyBuiltDependencies:
   - esbuild
   - lefthook
