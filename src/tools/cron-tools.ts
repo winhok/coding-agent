@@ -2,14 +2,14 @@ import type { CronService } from "../cron/service.js";
 import type { CronJobConfig, ScheduleType } from "../cron/types.js";
 import type { ToolDefinition } from "./registry.js";
 
-interface CronToolInput {
+type CronToolInput = {
   action: string;
   id?: string;
   name?: string;
   schedule?: string;
   prompt?: string;
   handler?: string;
-}
+};
 
 export function createCronTool(cronService: CronService): ToolDefinition {
   return {

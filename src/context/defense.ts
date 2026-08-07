@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import {
+  isToolResultPart,
   textToolResultOutput,
   toolResultOutputToText,
 } from "./tool-result-output.js";
@@ -108,10 +109,10 @@ export function truncateToolResults(
   let compacted = 0;
 
   const result = messages.map((msg) => {
-    if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
+    if (msg.role !== "tool") return msg;
 
-    const newContent = msg.content.map((part: any) => {
-      if (!part.output) return part;
+    const newContent = msg.content.map((part) => {
+      if (!isToolResultPart(part)) return part;
       const outputText = toolResultOutputToText(part.output);
       if (outputText.length <= config.maxSingleResult) return part;
 
@@ -138,14 +139,17 @@ export function truncateToolResults(
     if (Array.isArray(msg.content)) {
       return (
         sum +
-        (msg.content as any[]).reduce(
-          (s, p) =>
-            s +
-            (p.output
-              ? toolResultOutputToText(p.output).length
-              : (p.text as string)?.length || 0),
-          0,
-        )
+        msg.content.reduce((partSum, part) => {
+          if ("output" in part) {
+            return partSum + toolResultOutputToText(part.output).length;
+          }
+          return (
+            partSum +
+            ("text" in part && typeof part.text === "string"
+              ? part.text.length
+              : 0)
+          );
+        }, 0)
       );
     }
     return sum;
@@ -159,21 +163,29 @@ export function truncateToolResults(
     ) {
       const msg = result[i];
       if (!msg) continue;
-      if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
-      const toolName = (msg.content as any[])[0]?.toolName || "unknown";
-      const oldSize = (msg.content as any[]).reduce(
-        (s: number, p: any) =>
-          s + (p.output ? toolResultOutputToText(p.output).length : 0),
+      if (msg.role !== "tool") continue;
+      const toolName =
+        msg.content.find(isToolResultPart)?.toolName ?? "unknown";
+      const oldSize = msg.content.reduce(
+        (sum, part) =>
+          sum +
+          (isToolResultPart(part)
+            ? toolResultOutputToText(part.output).length
+            : 0),
         0,
       );
       result[i] = {
         ...msg,
-        content: (msg.content as any[]).map((p: any) => ({
-          ...p,
-          output: textToolResultOutput(
-            `[compacted: ${toolName} output removed to free context]`,
-          ),
-        })),
+        content: msg.content.map((part) =>
+          isToolResultPart(part)
+            ? {
+                ...part,
+                output: textToolResultOutput(
+                  `[compacted: ${toolName} output removed to free context]`,
+                ),
+              }
+            : part,
+        ),
       };
       totalChars -= oldSize;
       compacted++;
@@ -211,15 +223,17 @@ export function ttlPrune(
   let hardPruned = 0;
 
   const result = messages.map((msg, idx) => {
-    if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
+    if (msg.role !== "tool") return msg;
 
     const ts = timestamps.get(idx);
     if (!ts) return msg;
 
     const age = now - ts;
 
-    const outputText = (msg.content as any[])
-      .map((p: any) => (p.output ? toolResultOutputToText(p.output) : ""))
+    const outputText = msg.content
+      .map((part) =>
+        isToolResultPart(part) ? toolResultOutputToText(part.output) : "",
+      )
       .join("");
     const isError = /error|失败|不存在|denied|refused|timeout/i.test(
       outputText,
@@ -228,19 +242,26 @@ export function ttlPrune(
 
     if (age >= config.hardTTLMs) {
       hardPruned++;
-      const toolName = (msg.content[0] as any)?.toolName || "unknown";
+      const toolName =
+        msg.content.find(isToolResultPart)?.toolName ?? "unknown";
       return {
         ...msg,
-        content: msg.content.map((part: any) => ({
-          ...part,
-          output: textToolResultOutput(`[tool result expired: ${toolName}]`),
-        })),
+        content: msg.content.map((part) =>
+          isToolResultPart(part)
+            ? {
+                ...part,
+                output: textToolResultOutput(
+                  `[tool result expired: ${toolName}]`,
+                ),
+              }
+            : part,
+        ),
       };
     }
 
     if (age >= config.softTTLMs) {
-      const newContent = msg.content.map((part: any) => {
-        if (!part.output) return part;
+      const newContent = msg.content.map((part) => {
+        if (!isToolResultPart(part)) return part;
         const outputText = toolResultOutputToText(part.output);
         if (outputText.length <= config.keepHeadTail * 2) return part;
 

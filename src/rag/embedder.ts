@@ -24,8 +24,10 @@ export function createDashScopeEmbedder(apiKey: string): EmbeddingFn {
         `Embedding API error: ${resp.status} ${await resp.text()}`,
       );
     }
-    const data = (await resp.json()) as any;
-    return data.data.map((d: any) => d.embedding as number[]);
+    const data = (await resp.json()) as {
+      data: Array<{ embedding: number[] }>;
+    };
+    return data.data.map(({ embedding }) => embedding);
   };
 }
 

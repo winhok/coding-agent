@@ -22,8 +22,10 @@ export interface ExecutableTool {
   isReadOnly?: boolean;
   holdsExecutionLock?: boolean;
   maxResultChars?: number;
-  // biome-ignore lint/suspicious/noExplicitAny: registered tools have heterogeneous validated inputs
-  execute: (input: any, context?: ToolExecutionContext) => Promise<unknown>;
+  execute(
+    input: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<unknown>;
 }
 
 export interface ToolExecutionContext extends AgentRunContext {
@@ -77,8 +79,7 @@ export class ToolExecutionPipeline {
 
   async execute(
     tool: ExecutableTool,
-    // biome-ignore lint/suspicious/noExplicitAny: the AI SDK validates each tool's schema before execution
-    input: any,
+    input: unknown,
     {
       useLocks,
       hookPipeline,
@@ -109,36 +110,45 @@ export class ToolExecutionPipeline {
       this.recordAudit(tool.name, input, "invalid", startedAt, validationError);
       return `[参数校验失败] ${tool.name}: ${validationError}`;
     }
+    const validatedInput = input as Record<string, unknown>;
 
-    if (!authorize(tool.name, input)) {
+    if (!authorize(tool.name, validatedInput)) {
       const reason = "当前角色无权使用此工具";
-      this.recordAudit(tool.name, input, "denied", startedAt, reason, {
+      this.recordAudit(tool.name, validatedInput, "denied", startedAt, reason, {
         level: "deny",
         approval: "not_required",
       });
       return `[拒绝执行] ${reason}: ${tool.name}`;
     }
 
-    const decision = decideToolPermission(tool, input);
+    const decision = decideToolPermission(tool, validatedInput);
     let approval: NonNullable<
       ToolExecutionAuditEntry["permission"]
     >["approval"] = "not_required";
 
     if (decision.level === "deny") {
-      this.recordAudit(tool.name, input, "denied", startedAt, decision.reason, {
-        level: decision.level,
-        approval,
-      });
+      this.recordAudit(
+        tool.name,
+        validatedInput,
+        "denied",
+        startedAt,
+        decision.reason,
+        { level: decision.level, approval },
+      );
       return `[拒绝执行] ${decision.reason}: ${tool.name}`;
     }
 
     if (decision.level === "ask") {
       if (!requestApproval) {
         const reason = `${decision.reason}，但当前运行环境没有审批通道`;
-        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
-          level: decision.level,
-          approval: "unavailable",
-        });
+        this.recordAudit(
+          tool.name,
+          validatedInput,
+          "denied",
+          startedAt,
+          reason,
+          { level: decision.level, approval: "unavailable" },
+        );
         return `[拒绝执行] ${reason}: ${tool.name}`;
       }
 
@@ -146,26 +156,34 @@ export class ToolExecutionPipeline {
       try {
         approved = await requestApproval({
           tool: tool.name,
-          input,
+          input: validatedInput,
           reason: decision.reason,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const reason = `${decision.reason}，审批失败: ${message}`;
-        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
-          level: decision.level,
-          approval: "unavailable",
-        });
+        this.recordAudit(
+          tool.name,
+          validatedInput,
+          "denied",
+          startedAt,
+          reason,
+          { level: decision.level, approval: "unavailable" },
+        );
         return `[拒绝执行] ${reason}: ${tool.name}`;
       }
 
       approval = approved ? "approved" : "rejected";
       if (!approved) {
         const reason = `用户拒绝: ${decision.reason}`;
-        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
-          level: decision.level,
-          approval,
-        });
+        this.recordAudit(
+          tool.name,
+          validatedInput,
+          "denied",
+          startedAt,
+          reason,
+          { level: decision.level, approval },
+        );
         return `[拒绝执行] ${reason}: ${tool.name}`;
       }
     }
@@ -181,12 +199,16 @@ export class ToolExecutionPipeline {
     }
 
     try {
-      const raw = await tool.execute(input, executionContext);
+      const raw = await tool.execute(validatedInput, executionContext);
       const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
       let output = truncateResult(text, tool.maxResultChars);
 
       if (hookPipeline) {
-        const postResult = await hookPipeline.runPost(tool.name, input, output);
+        const postResult = await hookPipeline.runPost(
+          tool.name,
+          validatedInput,
+          output,
+        );
         if (postResult.modifiedOutput !== undefined) {
           output = String(postResult.modifiedOutput);
         }
@@ -194,7 +216,7 @@ export class ToolExecutionPipeline {
 
       this.recordAudit(
         tool.name,
-        input,
+        validatedInput,
         "completed",
         startedAt,
         undefined,
@@ -204,7 +226,7 @@ export class ToolExecutionPipeline {
     } catch (error) {
       this.recordAudit(
         tool.name,
-        input,
+        validatedInput,
         "failed",
         startedAt,
         error instanceof Error ? error.message : String(error),

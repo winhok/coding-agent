@@ -1,4 +1,4 @@
-import type { MemoryStore } from "../memory/store.js";
+import type { MemoryEntry, MemoryStore } from "../memory/store.js";
 import type { ToolDefinition } from "./registry.js";
 
 export function createMemoryTool(memoryStore: MemoryStore): ToolDefinition {
@@ -35,18 +35,27 @@ export function createMemoryTool(memoryStore: MemoryStore): ToolDefinition {
     },
     isConcurrencySafe: false,
     isReadOnly: false,
-    execute: async (args: any) => {
-      switch (args.action) {
+    execute: async (args) => {
+      const input = args;
+
+      switch (input.action) {
         case "save": {
-          if (!args.name || !args.type || !args.content) {
+          if (
+            typeof input.name !== "string" ||
+            !isMemoryType(input.type) ||
+            typeof input.content !== "string"
+          ) {
             return "保存失败：需要 name、type、content 参数";
           }
           try {
             const filename = memoryStore.save({
-              name: args.name,
-              description: args.description || args.name,
-              type: args.type,
-              content: args.content,
+              name: input.name,
+              description:
+                typeof input.description === "string"
+                  ? input.description
+                  : input.name,
+              type: input.type,
+              content: input.content,
             });
             return `已保存到记忆: ${filename}`;
           } catch (error) {
@@ -64,12 +73,12 @@ export function createMemoryTool(memoryStore: MemoryStore): ToolDefinition {
           );
         }
         case "search": {
-          if (typeof args.query !== "string" || !args.query.trim()) {
+          if (typeof input.query !== "string" || !input.query.trim()) {
             return "搜索失败：需要 query 参数";
           }
-          const results = memoryStore.search(args.query, 5);
+          const results = memoryStore.search(input.query, 5);
           if (results.length === 0)
-            return `没有找到与 "${args.query}" 相关的记忆。`;
+            return `没有找到与 "${input.query}" 相关的记忆。`;
           return (
             `BM25 搜索结果（${results.length} 条）：\n` +
             results
@@ -81,26 +90,26 @@ export function createMemoryTool(memoryStore: MemoryStore): ToolDefinition {
           );
         }
         case "read": {
-          if (typeof args.filename !== "string" || !args.filename) {
+          if (typeof input.filename !== "string" || !input.filename) {
             return "读取失败：需要 filename 参数";
           }
           try {
             return (
-              memoryStore.loadFile(args.filename) ??
-              `文件不存在: ${args.filename}`
+              memoryStore.loadFile(input.filename) ??
+              `文件不存在: ${input.filename}`
             );
           } catch (error) {
             return `读取失败：${getErrorMessage(error)}`;
           }
         }
         case "delete": {
-          if (typeof args.filename !== "string" || !args.filename) {
+          if (typeof input.filename !== "string" || !input.filename) {
             return "删除失败：需要 filename 参数";
           }
           try {
-            return memoryStore.delete(args.filename)
-              ? `已删除: ${args.filename}`
-              : `文件不存在: ${args.filename}`;
+            return memoryStore.delete(input.filename)
+              ? `已删除: ${input.filename}`
+              : `文件不存在: ${input.filename}`;
           } catch (error) {
             return `删除失败：${getErrorMessage(error)}`;
           }
@@ -136,10 +145,19 @@ export function createMemoryTool(memoryStore: MemoryStore): ToolDefinition {
           return lines.join("\n");
         }
         default:
-          return `未知操作: ${args.action}`;
+          return `未知操作: ${String(input.action)}`;
       }
     },
   };
+}
+
+function isMemoryType(value: unknown): value is MemoryEntry["type"] {
+  return (
+    value === "user" ||
+    value === "feedback" ||
+    value === "project" ||
+    value === "reference"
+  );
 }
 
 function getErrorMessage(error: unknown): string {

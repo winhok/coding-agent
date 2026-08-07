@@ -1,5 +1,6 @@
-import { generateText, type ModelMessage } from "ai";
+import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import {
+  isToolResultPart,
   textToolResultOutput,
   toolResultOutputToText,
 } from "./tool-result-output.js";
@@ -43,7 +44,7 @@ export function microcompact(messages: ModelMessage[]): {
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (!msg) continue;
-    if (msg.role === "tool" && Array.isArray(msg.content)) {
+    if (msg.role === "tool") {
       toolResultIndices.push(i);
     }
   }
@@ -55,18 +56,19 @@ export function microcompact(messages: ModelMessage[]): {
 
   const result = messages.map((msg, idx) => {
     if (!toClear.includes(idx)) return msg;
-    if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
+    if (msg.role !== "tool") return msg;
 
-    const toolName = (msg.content[0] as any)?.toolName || "unknown";
+    const toolName = msg.content.find(isToolResultPart)?.toolName ?? "unknown";
     if (!CLEARABLE_TOOLS.has(toolName)) return msg;
 
     cleared++;
     return {
       ...msg,
-      content: msg.content.map((part: any) => ({
-        ...part,
-        output: textToolResultOutput("[tool result cleared]"),
-      })),
+      content: msg.content.map((part) =>
+        isToolResultPart(part)
+          ? { ...part, output: textToolResultOutput("[tool result cleared]") }
+          : part,
+      ),
     };
   });
 
@@ -108,7 +110,7 @@ export interface CompactionResult {
 }
 
 export async function summarize(
-  model: any,
+  model: LanguageModel,
   messages: ModelMessage[],
   existingSummary?: string,
 ): Promise<CompactionResult> {

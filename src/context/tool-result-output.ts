@@ -1,6 +1,12 @@
-import type { ToolResultPart } from "ai";
+import type { ToolModelMessage, ToolResultPart } from "ai";
 
 type ToolResultOutput = ToolResultPart["output"];
+
+export function isToolResultPart(
+  part: ToolModelMessage["content"][number],
+): part is ToolResultPart {
+  return part.type === "tool-result";
+}
 
 export function textToolResultOutput(value: string): ToolResultOutput {
   return { type: "text", value };

@@ -8,6 +8,15 @@ export interface SqliteVectorStoreOptions {
   loadVectorExtension?: (db: Database.Database) => void;
 }
 
+interface ChunkRow {
+  id: string;
+  text: string;
+  source: string;
+  chunk_index: number;
+  embedding: string;
+  updated_at: number;
+}
+
 export class SqliteVectorStore {
   private db: Database.Database;
   private vectorExtensionAvailable = false;
@@ -189,7 +198,7 @@ export class SqliteVectorStore {
         ORDER BY v.distance
       `,
         )
-        .all(buf, topK) as any[];
+        .all(buf, topK) as Array<ChunkRow & { distance: number }>;
 
       return rows.map((r) => ({
         chunk: {
@@ -217,7 +226,7 @@ export class SqliteVectorStore {
         `SELECT id, text, source, chunk_index, embedding, updated_at
          FROM chunks`,
       )
-      .all() as any[];
+      .all() as ChunkRow[];
 
     return rows
       .map((r) => {
@@ -246,7 +255,7 @@ export class SqliteVectorStore {
     const ftsQuery = buildFtsQuery(query);
     if (ftsQuery === null) return [];
 
-    let rows: any[];
+    let rows: Array<Omit<ChunkRow, "updated_at"> & { rank: number }>;
     try {
       rows = this.db
         .prepare(
@@ -259,7 +268,7 @@ export class SqliteVectorStore {
       LIMIT ?
     `,
         )
-        .all(ftsQuery, topK) as any[];
+        .all(ftsQuery, topK) as typeof rows;
     } catch {
       return [];
     }
@@ -279,7 +288,10 @@ export class SqliteVectorStore {
   }
 
   size(): number {
-    return (this.db.prepare("SELECT COUNT(*) as n FROM chunks").get() as any).n;
+    const row = this.db.prepare("SELECT COUNT(*) as n FROM chunks").get() as {
+      n: number;
+    };
+    return row.n;
   }
 
   clear(): void {
@@ -292,9 +304,10 @@ export class SqliteVectorStore {
   }
 
   sources(): string[] {
-    return (
-      this.db.prepare("SELECT DISTINCT source FROM chunks").all() as any[]
-    ).map((r) => r.source);
+    const rows = this.db
+      .prepare("SELECT DISTINCT source FROM chunks")
+      .all() as Array<{ source: string }>;
+    return rows.map(({ source }) => source);
   }
 
   close(): void {

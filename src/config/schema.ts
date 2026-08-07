@@ -39,7 +39,7 @@ export const MCPServerConfigSchema = z.discriminatedUnion("type", [
   z.object({
     ...MCPServerBaseSchema,
     type: z.literal("http"),
-    url: z.string().url(),
+    url: z.url(),
     headers: z.record(z.string(), z.string()).default({}),
     requestTimeoutMs: z.number().positive().optional(),
   }),

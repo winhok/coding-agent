@@ -4,13 +4,15 @@ allowBuilds:
   lefthook: true
   protobufjs: true
 minimumReleaseAgeExclude:
-  - '@ai-sdk/gateway@4.0.37 || 4.0.43 || 4.0.44'
-  - ai@7.0.48 || 7.0.55 || 7.0.56
-  - tsx@4.23.4 || 4.23.9 || 4.23.10
-  - '@ai-sdk/anthropic@4.0.33 || 4.0.34'
-  - '@ai-sdk/openai@4.0.33 || 4.0.34'
-  - '@ai-sdk/provider-utils@5.0.23'
+  - '@ai-sdk/gateway@4.0.37 || 4.0.43 || 4.0.44 || 4.0.45'
+  - ai@7.0.48 || 7.0.55 || 7.0.56 || 7.0.57
+  - tsx@4.23.4 || 4.23.9 || 4.23.10 || 4.23.11
+  - '@ai-sdk/anthropic@4.0.33 || 4.0.34 || 4.0.35'
+  - '@ai-sdk/openai@4.0.33 || 4.0.34 || 4.0.35'
+  - '@ai-sdk/provider-utils@5.0.23 || 5.0.24'
   - '@ai-sdk/provider@4.0.6'
+  - '@types/node@26.2.0'
+  - globby@16.2.3
 onlyBuiltDependencies:
   - esbuild
   - lefthook

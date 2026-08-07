@@ -1,4 +1,5 @@
 import { jsonSchema } from "ai";
+import type { JSONSchema7 } from "json-schema";
 import { createAgentRunContext } from "../agent/run-context.js";
 import type { HookPipeline } from "../security/hooks.js";
 import {
@@ -19,12 +20,7 @@ import {
 } from "./execution-pipeline.js";
 
 export interface ToolDefinition extends ExecutableTool {
-  name: string;
   description: string;
-  parameters: Record<string, unknown>;
-  isConcurrencySafe?: boolean;
-  isReadOnly?: boolean;
-  maxResultChars?: number;
   shouldDefer?: boolean; // 是否延迟加载
   searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
 }
@@ -95,12 +91,12 @@ export class ToolRegistry {
         this.register({
           name: prefixedName,
           description: `[MCP:${serverName}] ${tool.description}`,
-          parameters: tool.inputSchema as Record<string, unknown>,
+          parameters: tool.inputSchema,
           isConcurrencySafe: false,
           maxResultChars: DEFAULT_MAX_RESULT_CHARS,
           shouldDefer: true,
           searchHint: `${serverName} ${tool.name} ${tool.description}`,
-          execute: async (input: any) => {
+          execute: async (input) => {
             return toolClient.callTool(originalName, input);
           },
         });
@@ -255,41 +251,52 @@ export class ToolRegistry {
   private formatTools(
     executionOptions?: ToolExecutionOptions,
     selection?: ToolSelection,
-  ): Record<string, any> {
-    const result: Record<string, any> = {};
+  ) {
     const activeTools = this.getActiveTools(selection);
     const executionContext = normalizeExecutionContext(executionOptions);
 
-    for (const tool of activeTools) {
-      const hookPipeline = this.hookPipeline;
+    return Object.fromEntries(
+      activeTools.map((tool) => {
+        const hookPipeline = this.hookPipeline;
 
-      result[tool.name] = {
-        description: tool.description,
-        inputSchema: jsonSchema(tool.parameters as any),
-        execute: (input: any) =>
-          this.executionPipeline.execute(tool, input, {
-            useLocks: tool.holdsExecutionLock !== false,
-            hookPipeline,
-            authorize: (toolName) => {
-              const currentTool = this.tools.get(toolName);
-              return (
-                currentTool !== undefined &&
-                canUseTool(this.currentRole, currentTool, this.rolePolicies) &&
-                this.matchesSelection(currentTool, selection)
-              );
-            },
-            requestApproval: executionContext?.requestApproval,
-            executionContext,
-          }),
-      };
-    }
-    return result;
+        return [
+          tool.name,
+          {
+            description: tool.description,
+            inputSchema: jsonSchema(tool.parameters as JSONSchema7),
+            execute: (input: unknown) =>
+              this.executionPipeline.execute(
+                tool,
+                input as Record<string, unknown>,
+                {
+                  useLocks: tool.holdsExecutionLock !== false,
+                  hookPipeline,
+                  authorize: (toolName) => {
+                    const currentTool = this.tools.get(toolName);
+                    return (
+                      currentTool !== undefined &&
+                      canUseTool(
+                        this.currentRole,
+                        currentTool,
+                        this.rolePolicies,
+                      ) &&
+                      this.matchesSelection(currentTool, selection)
+                    );
+                  },
+                  requestApproval: executionContext?.requestApproval,
+                  executionContext,
+                },
+              ),
+          },
+        ] as const;
+      }),
+    );
   }
 
   toAISDKFormat(
     executionContext?: ToolExecutionOptions,
     selection?: ToolSelection,
-  ): Record<string, any> {
+  ) {
     return this.formatTools(executionContext, selection);
   }
 
