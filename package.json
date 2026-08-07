@@ -39,6 +39,7 @@
     "@ai-sdk/anthropic": "^4.0.33",
     "@ai-sdk/openai": "^4.0.33",
     "@inkjs/ui": "^2.0.0",
+    "@larksuiteoapi/node-sdk": "^1.72.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^7.0.55",
     "better-sqlite3": "^13.0.3",

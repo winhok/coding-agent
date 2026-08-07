@@ -4,6 +4,9 @@ import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
 import { agentLoop } from "./agent/loop.ts";
+import { FeishuChannel } from "./channels/feishu.js";
+import { ChannelGateway } from "./channels/gateway.js";
+import { createChannelCommands } from "./commands/channel.js";
 import { contextCommands } from "./commands/context.js";
 import { dreamCommands } from "./commands/dream.js";
 import { type CommandContext, createDispatcher } from "./commands/index.js";
@@ -116,15 +119,6 @@ export async function connectMCP(targetRegistry = registry) {
   }
 }
 
-const dispatch = createDispatcher([
-  ...contextCommands,
-  ...memoryCommands,
-  ...ragCommands,
-  ...dreamCommands,
-  ...createSkillCommands(skillLoader),
-  ...createPluginCommands(pluginManager, availablePlugins),
-]);
-
 async function importNewDocuments(): Promise<void> {
   if (!fs.existsSync("docs")) return;
 
@@ -191,6 +185,36 @@ async function main() {
     };
   }
 
+  // ── Channel Gateway ───────────────────────
+  const gateway = new ChannelGateway({
+    model,
+    registry,
+    buildSystem: () => builder.build(makePromptCtx()),
+  });
+
+  const feishuAppId = process.env.FEISHU_APP_ID || "";
+  const feishuAppSecret = process.env.FEISHU_APP_SECRET || "";
+  if (feishuAppId && feishuAppSecret) {
+    gateway.register(
+      new FeishuChannel({ appId: feishuAppId, appSecret: feishuAppSecret }),
+    );
+  } else {
+    console.log("  飞书未配置 APP_ID / APP_SECRET，跳过注册");
+  }
+
+  const dispatch = createDispatcher([
+    ...contextCommands,
+    ...memoryCommands,
+    ...ragCommands,
+    ...dreamCommands,
+    ...createSkillCommands(skillLoader),
+    ...createPluginCommands(pluginManager, availablePlugins),
+    ...createChannelCommands(gateway),
+  ]);
+
+  console.log("  启动 Channel...");
+  await gateway.startAll();
+
   if (isContinue && store.exists()) {
     const loaded = store.load();
     messages = loaded.messages;
@@ -252,6 +276,7 @@ async function main() {
       const trimmed = input.trim();
       if (trimmed === "/exit") {
         console.log("Bye!");
+        await gateway.stopAll();
         await pluginManager.unloadAll();
         await registry.closeAllMCP();
         vectorStore.close();
@@ -341,8 +366,9 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.15 — Plugins (type "/exit" to quit)');
+  console.log('Super Agent v0.16 — Channel (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /channel         — 查看通道状态");
   console.log("  /plugin          — 查看插件状态");
   console.log("  /plugin load X   — 加载插件");
   console.log("  /plugin unload X — 卸载插件");
