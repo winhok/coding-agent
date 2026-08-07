@@ -13,13 +13,17 @@ export const contextCommands: CommandHandler[] = [
     const system = renderPromptSections(sections);
     const memoryChars = sectionChars(sections, "memoryContext");
     const ragChars = sectionChars(sections, "ragContext");
+    const skillsChars = sectionChars(sections, "skillContext");
     const snapshot = buildContextSnapshot({
       modelName: ctx.modelName,
       modelId: ctx.modelId,
       windowTokens: ctx.contextWindowTokens,
       effectiveWindowTokens: ctx.effectiveContextWindowTokens,
       autocompactThresholdTokens: ctx.autocompactThresholdTokens,
-      systemPromptChars: Math.max(0, system.length - memoryChars - ragChars),
+      systemPromptChars: Math.max(
+        0,
+        system.length - memoryChars - ragChars - skillsChars,
+      ),
       toolDescriptionChars: ctx.registry
         .getActiveTools()
         .reduce(
@@ -34,7 +38,7 @@ export const contextCommands: CommandHandler[] = [
         ),
       memoryChars,
       ragChars,
-      skillsChars: 0,
+      skillsChars,
       messages: ctx.messages,
       tokenMeasurement: ctx.tokenMeasurement,
     });

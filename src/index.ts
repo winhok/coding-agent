@@ -9,6 +9,7 @@ import { dreamCommands } from "./commands/dream.js";
 import { type CommandContext, createDispatcher } from "./commands/index.js";
 import { memoryCommands } from "./commands/memory.js";
 import { ragCommands } from "./commands/rag.js";
+import { createSkillCommands } from "./commands/skill.js";
 import {
   estimateTokens,
   microcompact,
@@ -29,11 +30,13 @@ import { createDashScopeEmbedder, createMockEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
 import { remapMessageTimestamps, SessionStore } from "./session/store.js";
+import { SkillLoader } from "./skills/loader.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
 import { createMemoryTool } from "./tools/memory-tools.js";
 import { createRagTools } from "./tools/rag-tools.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { createSkillTool } from "./tools/skill-tool.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
 import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
 
@@ -74,6 +77,10 @@ const embedFn = process.env.DASHSCOPE_API_KEY
   : createMockEmbedder();
 registry.register(...createRagTools(vectorStore, embedFn));
 
+const skillLoader = new SkillLoader(".");
+const loadedSkills = skillLoader.load();
+registry.register(createSkillTool(skillLoader));
+
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
 export async function connectMCP(targetRegistry = registry) {
@@ -107,6 +114,7 @@ const dispatch = createDispatcher([
   ...memoryCommands,
   ...ragCommands,
   ...dreamCommands,
+  ...createSkillCommands(skillLoader),
 ]);
 
 async function importNewDocuments(): Promise<void> {
@@ -151,6 +159,7 @@ async function main() {
     .pipe("deferredTools", deferredTools())
     .pipe("memoryContext", memoryContext(memoryStore))
     .pipe("ragContext", ragContext(vectorStore))
+    .pipe("skillContext", () => skillLoader.buildPromptSection())
     .pipe("sessionContext", sessionContext());
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -313,8 +322,10 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.13 — Memory Maintenance (type "/exit" to quit)');
+  console.log('Super Agent v0.14 — Skills (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /skill          — 查看可用的 skills");
+  console.log("  /code-review    — 直接加载并执行 code-review skill");
   console.log("  /ingest <path>  — 导入文档到知识库");
   console.log("  /rag            — 查看知识库状态");
   console.log("  /memory         — 查看记忆（带 ⚠️ 标记）");
@@ -327,6 +338,12 @@ async function main() {
   console.log("  /exit           — 退出");
   console.log("");
   console.log(`  已加载 ${memoryStore.list().length} 条历史记忆`);
+  if (loadedSkills.length > 0) {
+    console.log(`  发现 ${loadedSkills.length} 个 skill：`);
+    for (const skill of loadedSkills) {
+      console.log(`    /${skill.name} — ${skill.description}`);
+    }
+  }
   console.log("");
 
   await importNewDocuments();
