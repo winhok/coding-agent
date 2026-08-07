@@ -1,4 +1,5 @@
 import { type LanguageModel, type ModelMessage, streamText } from "ai";
+import type { RequestApproval } from "../security/permissions.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { SubAgentRegistry } from "./registry.js";
 import type { SpawnRequest } from "./types.js";
@@ -9,6 +10,7 @@ export interface SpawnContext {
   agentRegistry: SubAgentRegistry;
   buildSystem: () => string;
   currentDepth: number;
+  requestApproval?: RequestApproval;
 }
 
 const MAX_STEPS = 30;
@@ -67,7 +69,12 @@ export async function spawnAgent(
 
   try {
     const system = `${ctx.buildSystem()}\n\n[子 Agent 模式] 你是一个被派出去执行具体任务的子 Agent。直接完成任务并输出结论，保持简洁。\n当你需要同时获取多个独立信息时（比如读多个文件、搜多个关键词），尽可能在一次回复中并行调用多个工具，不要一个个串行调。`;
-    const tools = ctx.registry.toAISDKFormatUnlocked(EXCLUDED_TOOLS);
+    const tools = ctx.registry.toAISDKFormatUnlocked(
+      EXCLUDED_TOOLS,
+      ctx.requestApproval
+        ? { requestApproval: ctx.requestApproval }
+        : undefined,
+    );
     const timer = setTimeout(() => controller.abort(), timeout);
 
     try {

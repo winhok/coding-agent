@@ -1,22 +1,36 @@
 import Ajv, { type ValidateFunction } from "ajv";
-import { classifyBashCommand } from "../security/bash-classifier.js";
 import type { HookPipeline } from "../security/hooks.js";
+import {
+  decideToolPermission,
+  type PermissionLevel,
+  type RequestApproval,
+} from "../security/permissions.js";
 
 export const DEFAULT_MAX_RESULT_CHARS = 3000;
+const MAX_AUDIT_ENTRIES = 1000;
+const MAX_AUDIT_STRING_CHARS = 1000;
+const SENSITIVE_AUDIT_KEY =
+  /(?:authorization|cookie|password|secret|token|api[_-]?key)/i;
 
 export interface ExecutableTool {
   name: string;
   parameters: Record<string, unknown>;
   isConcurrencySafe?: boolean;
+  isReadOnly?: boolean;
   maxResultChars?: number;
   // biome-ignore lint/suspicious/noExplicitAny: registered tools have heterogeneous validated inputs
-  execute: (input: any) => Promise<unknown>;
+  execute: (input: any, context?: ToolExecutionContext) => Promise<unknown>;
+}
+
+export interface ToolExecutionContext {
+  requestApproval?: RequestApproval;
 }
 
 interface ExecuteOptions {
   useLocks: boolean;
   hookPipeline: HookPipeline | undefined;
   authorize: (toolName: string, input: unknown) => boolean;
+  requestApproval: RequestApproval | undefined;
 }
 
 export type ToolExecutionOutcome =
@@ -33,6 +47,10 @@ export interface ToolExecutionAuditEntry {
   input: unknown;
   outcome: ToolExecutionOutcome;
   reason?: string;
+  permission?: {
+    level: PermissionLevel;
+    approval: "not_required" | "approved" | "rejected" | "unavailable";
+  };
 }
 
 /**
@@ -54,7 +72,7 @@ export class ToolExecutionPipeline {
     tool: ExecutableTool,
     // biome-ignore lint/suspicious/noExplicitAny: the AI SDK validates each tool's schema before execution
     input: any,
-    { useLocks, hookPipeline, authorize }: ExecuteOptions,
+    { useLocks, hookPipeline, authorize, requestApproval }: ExecuteOptions,
   ): Promise<string> {
     const startedAt = Date.now();
 
@@ -81,22 +99,65 @@ export class ToolExecutionPipeline {
 
     if (!authorize(tool.name, input)) {
       const reason = "当前角色无权使用此工具";
-      this.recordAudit(tool.name, input, "denied", startedAt, reason);
+      this.recordAudit(tool.name, input, "denied", startedAt, reason, {
+        level: "deny",
+        approval: "not_required",
+      });
       return `[拒绝执行] ${reason}: ${tool.name}`;
     }
 
-    const command = getCommand(input);
-    if (tool.name === "bash" && command) {
-      const risk = classifyBashCommand(command);
-      if (risk.level === "dangerous") {
-        const reason = `检测到危险操作: ${risk.reason}`;
-        this.recordAudit(tool.name, input, "denied", startedAt, reason);
-        return `[拒绝执行] ${reason}\n命令: ${command}`;
+    const decision = decideToolPermission(tool, input);
+    let approval: NonNullable<
+      ToolExecutionAuditEntry["permission"]
+    >["approval"] = "not_required";
+
+    if (decision.level === "deny") {
+      this.recordAudit(tool.name, input, "denied", startedAt, decision.reason, {
+        level: decision.level,
+        approval,
+      });
+      return `[拒绝执行] ${decision.reason}: ${tool.name}`;
+    }
+
+    if (decision.level === "ask") {
+      if (!requestApproval) {
+        const reason = `${decision.reason}，但当前运行环境没有审批通道`;
+        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
+          level: decision.level,
+          approval: "unavailable",
+        });
+        return `[拒绝执行] ${reason}: ${tool.name}`;
       }
-      if (risk.level === "moderate") {
-        console.log(`  [安全] ⚠ ${risk.reason}: ${command}`);
+
+      let approved = false;
+      try {
+        approved = await requestApproval({
+          tool: tool.name,
+          input,
+          reason: decision.reason,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const reason = `${decision.reason}，审批失败: ${message}`;
+        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
+          level: decision.level,
+          approval: "unavailable",
+        });
+        return `[拒绝执行] ${reason}: ${tool.name}`;
+      }
+
+      approval = approved ? "approved" : "rejected";
+      if (!approved) {
+        const reason = `用户拒绝: ${decision.reason}`;
+        this.recordAudit(tool.name, input, "denied", startedAt, reason, {
+          level: decision.level,
+          approval,
+        });
+        return `[拒绝执行] ${reason}: ${tool.name}`;
       }
     }
+
+    const permission = { level: decision.level, approval };
 
     if (useLocks) {
       if (tool.isConcurrencySafe === true) {
@@ -107,7 +168,10 @@ export class ToolExecutionPipeline {
     }
 
     try {
-      const raw = await tool.execute(input);
+      const raw = await tool.execute(
+        input,
+        requestApproval ? { requestApproval } : undefined,
+      );
       const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
       let output = truncateResult(text, tool.maxResultChars);
 
@@ -118,7 +182,14 @@ export class ToolExecutionPipeline {
         }
       }
 
-      this.recordAudit(tool.name, input, "completed", startedAt);
+      this.recordAudit(
+        tool.name,
+        input,
+        "completed",
+        startedAt,
+        undefined,
+        permission,
+      );
       return output;
     } catch (error) {
       this.recordAudit(
@@ -127,6 +198,7 @@ export class ToolExecutionPipeline {
         "failed",
         startedAt,
         error instanceof Error ? error.message : String(error),
+        permission,
       );
       throw error;
     } finally {
@@ -167,15 +239,18 @@ export class ToolExecutionPipeline {
     outcome: ToolExecutionOutcome,
     startedAt: number,
     reason?: string,
+    permission?: ToolExecutionAuditEntry["permission"],
   ): void {
     this.auditLog.push({
       timestamp: startedAt,
       durationMs: Date.now() - startedAt,
       tool,
-      input,
+      input: sanitizeAuditValue(input),
       outcome,
       ...(reason === undefined ? {} : { reason }),
+      ...(permission === undefined ? {} : { permission }),
     });
+    if (this.auditLog.length > MAX_AUDIT_ENTRIES) this.auditLog.shift();
   }
 
   private async acquireConcurrent(): Promise<void> {
@@ -208,11 +283,28 @@ export class ToolExecutionPipeline {
   }
 }
 
-function getCommand(input: unknown): string | undefined {
-  if (typeof input !== "object" || input === null || !("command" in input)) {
-    return undefined;
+function sanitizeAuditValue(value: unknown, key = "", depth = 0): unknown {
+  if (SENSITIVE_AUDIT_KEY.test(key)) return "[REDACTED]";
+  if (typeof value === "string") {
+    if (value.length <= MAX_AUDIT_STRING_CHARS) return value;
+    return `${value.slice(0, MAX_AUDIT_STRING_CHARS)}... [TRUNCATED]`;
   }
-  return typeof input.command === "string" ? input.command : undefined;
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 5) return "[MAX_DEPTH]";
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 20)
+      .map((item) => sanitizeAuditValue(item, "", depth + 1));
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .slice(0, 50)
+      .map(([entryKey, entryValue]) => [
+        entryKey,
+        sanitizeAuditValue(entryValue, entryKey, depth + 1),
+      ]),
+  );
 }
 
 export function truncateResult(

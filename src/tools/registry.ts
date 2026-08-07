@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_RESULT_CHARS,
   type ExecutableTool,
   type ToolExecutionAuditEntry,
+  type ToolExecutionContext,
   ToolExecutionPipeline,
   truncateResult,
 } from "./execution-pipeline.js";
@@ -75,7 +76,6 @@ export class ToolRegistry {
         description: `[MCP:${serverName}] ${tool.description}`,
         parameters: tool.inputSchema as Record<string, unknown>,
         isConcurrencySafe: true,
-        isReadOnly: true,
         maxResultChars: DEFAULT_MAX_RESULT_CHARS,
         shouldDefer: true,
         searchHint: `${serverName} ${tool.name} ${tool.description}`,
@@ -206,6 +206,7 @@ export class ToolRegistry {
   private formatTools(
     useLocks: boolean,
     excludeTools?: Set<string>,
+    executionContext?: ToolExecutionContext,
   ): Record<string, any> {
     const result: Record<string, any> = {};
     const activeTools = this.getActiveTools().filter(
@@ -223,18 +224,22 @@ export class ToolRegistry {
             useLocks,
             hookPipeline,
             authorize: (toolName) => canUseTool(this.currentRole, toolName),
+            requestApproval: executionContext?.requestApproval,
           }),
       };
     }
     return result;
   }
 
-  toAISDKFormatUnlocked(excludeTools?: Set<string>): Record<string, any> {
-    return this.formatTools(false, excludeTools);
+  toAISDKFormatUnlocked(
+    excludeTools?: Set<string>,
+    executionContext?: ToolExecutionContext,
+  ): Record<string, any> {
+    return this.formatTools(false, excludeTools, executionContext);
   }
 
-  toAISDKFormat(): Record<string, any> {
-    return this.formatTools(true);
+  toAISDKFormat(executionContext?: ToolExecutionContext): Record<string, any> {
+    return this.formatTools(true, undefined, executionContext);
   }
 }
 

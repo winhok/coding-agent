@@ -5,6 +5,7 @@ import {
   type ModelMessage,
   streamText,
 } from "ai";
+import type { RequestApproval } from "../security/permissions.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { LocalTraceRecorder } from "../trace/recorder.js";
 import {
@@ -39,6 +40,7 @@ export interface AgentLoopOptions {
   eventSink?: AgentEventSink;
   maxSteps?: number;
   maxRetries?: number;
+  requestApproval?: RequestApproval;
 }
 
 const EMPTY_USAGE: StepUsage = {
@@ -59,6 +61,7 @@ export async function agentLoop({
   eventSink,
   maxSteps = MAX_STEPS,
   maxRetries = MAX_RETRIES,
+  requestApproval,
 }: AgentLoopOptions): Promise<AgentLoopResult> {
   let step = 0;
   let toolCalls = 0;
@@ -93,7 +96,9 @@ export async function agentLoop({
           const result = streamText({
             model,
             system,
-            tools: registry.toAISDKFormat(),
+            tools: registry.toAISDKFormat(
+              requestApproval ? { requestApproval } : undefined,
+            ),
             messages,
             maxRetries: 0,
             providerOptions: { openai: { parallelToolCalls: true } },

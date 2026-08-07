@@ -21,6 +21,12 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bwget\b.*\|\s*(ba)?sh/, reason: "远程脚本执行" },
   { pattern: /\beval\b/, reason: "eval 动态执行" },
   { pattern: />\s*\/etc\//, reason: "覆写系统配置" },
+  {
+    pattern: /\bgit\s+push\b.*(?:--force(?:-with-lease)?|-f)\b/,
+    reason: "Git 强制推送",
+  },
+  { pattern: /\bgit\s+reset\s+--hard\b/, reason: "Git 硬重置" },
+  { pattern: /\bgit\s+clean\b/, reason: "Git 清理未跟踪文件" },
 ];
 
 const MODERATE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
@@ -31,7 +37,6 @@ const MODERATE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bkill\b/, reason: "终止进程" },
   { pattern: /\bpkill\b/, reason: "批量终止进程" },
   { pattern: /\bgit\s+push\b/, reason: "Git 推送" },
-  { pattern: /\bgit\s+reset\s+--hard\b/, reason: "Git 硬重置" },
   { pattern: /\bnpm\s+publish\b/, reason: "发布 npm 包" },
   { pattern: /\bdocker\s+rm\b/, reason: "删除容器" },
 ];

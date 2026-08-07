@@ -45,6 +45,10 @@ import { createDashScopeEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
 import { HookPipeline } from "./security/hooks.js";
+import type {
+  ApprovalRequest,
+  RequestApproval,
+} from "./security/permissions.js";
 import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { SkillLoader } from "./skills/loader.js";
 import { createCronTool } from "./tools/cron-tools.js";
@@ -252,6 +256,37 @@ export async function startAgent(): Promise<void> {
   if (vectorStore) builder.pipe("ragContext", ragContext(vectorStore));
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let approvalQueue = Promise.resolve();
+
+  const requestApproval: RequestApproval = (request) => {
+    const decision = approvalQueue.then(() => promptForApproval(request));
+    approvalQueue = decision.then(
+      () => undefined,
+      () => undefined,
+    );
+    return decision;
+  };
+
+  function promptForApproval(request: ApprovalRequest): Promise<boolean> {
+    const input = request.input as Record<string, unknown> | null;
+    const target =
+      request.tool === "bash"
+        ? String(input?.command ?? "")
+        : typeof input?.path === "string"
+          ? input.path
+          : String(JSON.stringify(request.input) ?? request.input ?? "").slice(
+              0,
+              160,
+            );
+
+    console.log(`\n  [权限确认] ${request.tool}: ${target}`);
+    console.log(`  原因: ${request.reason}`);
+    return new Promise((resolve) => {
+      rl.question("  允许执行? (y/N) ", (answer) => {
+        resolve(answer.trim().toLowerCase().startsWith("y"));
+      });
+    });
+  }
 
   function makePromptCtx(): PromptContext {
     return {
@@ -485,6 +520,7 @@ export async function startAgent(): Promise<void> {
           },
           eventSink: terminalAgentEventSink,
           trace,
+          requestApproval,
         });
         newMessages = result.appendedMessages;
         await trace.finish("completed");

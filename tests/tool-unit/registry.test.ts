@@ -32,6 +32,7 @@ describe("tool-unit registry", () => {
       description: "safe read",
       parameters: { type: "object", properties: {} },
       isConcurrencySafe: true,
+      isReadOnly: true,
       execute: async () => {
         readStarted();
         await releaseReadPromise;
@@ -44,6 +45,7 @@ describe("tool-unit registry", () => {
       description: "exclusive write",
       parameters: { type: "object", properties: {} },
       isConcurrencySafe: false,
+      isReadOnly: false,
       execute: async () => {
         writeObservedReadFinished = readFinished;
         return "write";
@@ -52,7 +54,9 @@ describe("tool-unit registry", () => {
 
     const registry = new ToolRegistry();
     registry.register(safeRead, exclusiveWrite);
-    const formatted = registry.toAISDKFormat();
+    const formatted = registry.toAISDKFormat({
+      requestApproval: async () => true,
+    });
     const formattedRead = formatted.safe_read;
     const formattedWrite = formatted.exclusive_write;
     assert.ok(formattedRead);
@@ -85,6 +89,7 @@ describe("tool-unit registry", () => {
       description: name,
       parameters: { type: "object", properties: {} },
       isConcurrencySafe: true,
+      isReadOnly: true,
       execute: async () => {
         started++;
         await releaseReadsPromise;
@@ -128,6 +133,7 @@ describe("tool-unit registry", () => {
         name: "spawn_agent",
         description: "parent spawn",
         parameters: { type: "object", properties: {} },
+        isReadOnly: true,
         execute: async () => {
           parentStarted();
           await releaseParentPromise;
@@ -138,6 +144,7 @@ describe("tool-unit registry", () => {
         name: "child_read",
         description: "child read",
         parameters: { type: "object", properties: {} },
+        isReadOnly: true,
         execute: async () => "child",
       },
     );
@@ -156,7 +163,7 @@ describe("tool-unit registry", () => {
     assert.equal(await parentPromise, "parent");
   });
 
-  it("registers MCP tools as deferred concurrency-safe reads", async () => {
+  it("registers MCP tools as deferred concurrency-safe unknown capabilities", async () => {
     const registry = new ToolRegistry();
 
     await registry.registerMCPServer("github", {
@@ -174,7 +181,7 @@ describe("tool-unit registry", () => {
 
     const tool = registry.get("mcp__github__create_issue");
 
-    assert.equal(tool?.isReadOnly, true);
+    assert.equal(tool?.isReadOnly, undefined);
     assert.equal(tool?.isConcurrencySafe, true);
     assert.equal(tool?.shouldDefer, true);
   });

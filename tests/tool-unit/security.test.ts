@@ -83,6 +83,18 @@ describe("bash classifier", () => {
       level: "dangerous",
       reason: "强制删除文件",
     });
+    assert.deepEqual(classifyBashCommand("git push --force origin main"), {
+      level: "dangerous",
+      reason: "Git 强制推送",
+    });
+    assert.deepEqual(classifyBashCommand("git reset --hard HEAD~1"), {
+      level: "dangerous",
+      reason: "Git 硬重置",
+    });
+    assert.deepEqual(classifyBashCommand("git clean -fd"), {
+      level: "dangerous",
+      reason: "Git 清理未跟踪文件",
+    });
   });
 
   it("blocks dangerous bash commands before execution", async () => {
@@ -198,6 +210,146 @@ describe("bash classifier", () => {
     assert.match(output, /^\[拒绝执行\]/);
     assert.equal(registry.getExecutionAuditLog().at(-1)?.outcome, "denied");
   });
+
+  it("allows read-only tools without asking and audits the decision", async () => {
+    let approvalRequested = false;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_only",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => "ok",
+    });
+
+    const tool = registry.toAISDKFormat({
+      requestApproval: async () => {
+        approvalRequested = true;
+        return false;
+      },
+    }).read_only;
+    assert.ok(tool);
+
+    assert.equal(await tool.execute({}), "ok");
+    assert.equal(approvalRequested, false);
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1)?.permission, {
+      level: "allow",
+      approval: "not_required",
+    });
+  });
+
+  it("allows task bookkeeping without treating it as an external mutation", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "create_todos",
+      description: "plan",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: false,
+      execute: async () => "planned",
+    });
+    const tool = registry.toAISDKFormat().create_todos;
+    assert.ok(tool);
+
+    assert.equal(await tool.execute({}), "planned");
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1)?.permission, {
+      level: "allow",
+      approval: "not_required",
+    });
+  });
+
+  it("asks for the final input before executing a mutating tool", async () => {
+    const seen: unknown[] = [];
+    const hooks = new HookPipeline();
+    hooks.registerPre("rewrite", () => ({
+      action: "modify",
+      modifiedInput: { path: "final.txt" },
+    }));
+    const registry = new ToolRegistry();
+    registry.setHookPipeline(hooks);
+    registry.register({
+      name: "write_file",
+      description: "write",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      isReadOnly: false,
+      execute: async (input) => String(input.path),
+    });
+
+    const tool = registry.toAISDKFormat({
+      requestApproval: async (request) => {
+        seen.push(request.input);
+        return true;
+      },
+    }).write_file;
+    assert.ok(tool);
+
+    assert.equal(
+      await withMutedConsole(() => tool.execute({ path: "original.txt" })),
+      "final.txt",
+    );
+    assert.deepEqual(seen, [{ path: "final.txt" }]);
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1)?.permission, {
+      level: "ask",
+      approval: "approved",
+    });
+  });
+
+  it("denies an ask decision when approval is rejected or unavailable", async () => {
+    let executed = false;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "unknown_tool",
+      description: "unknown",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        executed = true;
+        return "executed";
+      },
+    });
+
+    const unavailable = registry.toAISDKFormat().unknown_tool;
+    assert.ok(unavailable);
+    assert.match(await unavailable.execute({}), /没有审批通道/);
+
+    const rejected = registry.toAISDKFormat({
+      requestApproval: async () => false,
+    }).unknown_tool;
+    assert.ok(rejected);
+    assert.match(await rejected.execute({}), /用户拒绝/);
+    assert.equal(executed, false);
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1)?.permission, {
+      level: "ask",
+      approval: "rejected",
+    });
+  });
+
+  it("redacts secrets from the execution audit", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_only",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => "ok",
+    });
+    const tool = registry.toAISDKFormat().read_only;
+    assert.ok(tool);
+
+    await tool.execute({
+      query: "public",
+      apiKey: "top-secret",
+      nested: { authorization: "Bearer secret" },
+    });
+
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1)?.input, {
+      query: "public",
+      apiKey: "[REDACTED]",
+      nested: { authorization: "[REDACTED]" },
+    });
+  });
 });
 
 describe("hook pipeline", () => {
@@ -223,6 +375,7 @@ describe("hook pipeline", () => {
       name: "custom_tool",
       description: "custom",
       parameters: { type: "object", properties: {} },
+      isReadOnly: true,
       execute: async (input: { value: number }) => String(input.value),
     });
 
@@ -240,6 +393,7 @@ describe("hook pipeline", () => {
       tool: "custom_tool",
       input: { value: 2 },
       outcome: "completed",
+      permission: { level: "allow", approval: "not_required" },
     });
     assert.deepEqual(pipeline.list(), {
       pre: ["first", "second"],
@@ -264,6 +418,7 @@ describe("hook pipeline", () => {
       name: "custom_tool",
       description: "custom",
       parameters: { type: "object", properties: {} },
+      isReadOnly: true,
       execute: async () => {
         executed = true;
         return "executed";
@@ -291,6 +446,7 @@ describe("hook pipeline", () => {
       name: "failing_tool",
       description: "fails",
       parameters: { type: "object", properties: {} },
+      isReadOnly: true,
       execute: async () => {
         throw new Error("boom");
       },
@@ -307,6 +463,7 @@ describe("hook pipeline", () => {
       input: {},
       outcome: "failed",
       reason: "boom",
+      permission: { level: "allow", approval: "not_required" },
     });
   });
 });

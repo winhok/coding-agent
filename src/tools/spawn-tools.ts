@@ -1,6 +1,7 @@
 import type { SubAgentRegistry } from "../agents/registry.js";
 import type { SpawnContext } from "../agents/spawn.js";
 import { spawnAgent, spawnParallel } from "../agents/spawn.js";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry.js";
 
 export function createSpawnTool(
@@ -27,8 +28,16 @@ export function createSpawnTool(
     },
     isConcurrencySafe: false,
     isReadOnly: true,
-    execute: async (input: { task?: string; tasks?: string[] }) => {
-      const context = getSpawnContext();
+    execute: async (
+      input: { task?: string; tasks?: string[] },
+      executionContext?: ToolExecutionContext,
+    ) => {
+      const context = {
+        ...getSpawnContext(),
+        ...(executionContext?.requestApproval
+          ? { requestApproval: executionContext.requestApproval }
+          : {}),
+      };
 
       if (input.tasks && input.tasks.length > 0) {
         const results = await spawnParallel(
