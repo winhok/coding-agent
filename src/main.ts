@@ -55,6 +55,7 @@ import { ToolRegistry } from "./tools/registry.js";
 import { createSkillTool } from "./tools/skill-tool.js";
 import { createSpawnTool } from "./tools/spawn-tools.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
+import { LocalTraceRecorder } from "./trace/recorder.js";
 import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
 
 // ── 加载配置 ────────────────────────────────
@@ -452,24 +453,41 @@ export async function startAgent(): Promise<void> {
       await compactIfNeeded();
 
       const currentSystem = builder.build(makePromptCtx());
-      const newMessages = await agentLoop(
-        model,
-        registry,
-        messages,
-        currentSystem,
-        tracker,
-        async (usage, responseMessages, needsFollowUp) => {
-          const promptTokens = promptTokensFromUsage(usage);
-          if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
-          tokenTracker.addMessages(responseMessages);
-          const responseStart = messages.length - responseMessages.length;
-          const now = Date.now();
-          for (let index = responseStart; index < messages.length; index++) {
-            timestamps.set(index, now);
-          }
-          if (needsFollowUp) await compactIfNeeded();
-        },
-      );
+      const trace = await LocalTraceRecorder.start({
+        sessionId: config.session.id,
+        model: model.modelId || config.model.name,
+      });
+      let newMessages: ModelMessage[];
+      try {
+        newMessages = await agentLoop(
+          model,
+          registry,
+          messages,
+          currentSystem,
+          tracker,
+          async (usage, responseMessages, needsFollowUp) => {
+            const promptTokens = promptTokensFromUsage(usage);
+            if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
+            tokenTracker.addMessages(responseMessages);
+            const responseStart = messages.length - responseMessages.length;
+            const now = Date.now();
+            for (let index = responseStart; index < messages.length; index++) {
+              timestamps.set(index, now);
+            }
+            if (needsFollowUp) await compactIfNeeded();
+          },
+          trace,
+        );
+        await trace.finish("completed");
+        console.log(`  [Trace] ${trace.filePath}`);
+      } catch (error) {
+        await trace.finish("failed", error);
+        console.error(
+          `  [Agent] ${error instanceof Error ? error.message : String(error)}`,
+        );
+        ask();
+        return;
+      }
 
       const now = Date.now();
       for (const message of newMessages) {

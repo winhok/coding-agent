@@ -10,6 +10,7 @@
     "start": "tsx src/index.ts",
     "init": "tsx src/index.ts init",
     "continue": "tsx src/index.ts --continue",
+    "trace:inspect": "tsx src/trace/inspect.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "pnpm clean && tsc -b tsconfig.build.json --force",
     "typecheck": "tsc -b --force",

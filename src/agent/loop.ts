@@ -6,6 +6,7 @@ import {
   streamText,
 } from "ai";
 import type { ToolRegistry } from "../tools/registry.js";
+import type { LocalTraceRecorder } from "../trace/recorder.js";
 import {
   normalizeUsage,
   type StepUsage,
@@ -28,6 +29,7 @@ export async function agentLoop(
     responseMessages: ModelMessage[],
     needsFollowUp: boolean,
   ) => void | Promise<void>,
+  trace?: LocalTraceRecorder,
 ) {
   let step = 0;
   const appendedMessages: ModelMessage[] = [];
@@ -36,6 +38,8 @@ export async function agentLoop(
   while (step < MAX_STEPS) {
     step++;
     console.log(`\n--- Step ${step} ---`);
+
+    await trace?.recordStepStarted({ step, system, messages });
 
     let hasToolCall = false;
     let fullText = "";
@@ -106,6 +110,7 @@ export async function agentLoop(
         stepUsage = await result.usage;
         break;
       } catch (error) {
+        await trace?.recordAttemptError(step, attempt, error);
         if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
         const delay = calculateDelay(attempt);
         console.log(
@@ -134,6 +139,12 @@ export async function agentLoop(
 
     const modelId = typeof model === "string" ? model : model.modelId;
     const norm = normalizeUsage(stepUsage);
+    await trace?.recordStepCompleted({
+      step,
+      text: fullText,
+      outputMessages: responseMessages,
+      usage: norm,
+    });
     const stepRecord = tracker?.record(modelId, norm);
     await onStepUsage?.(norm, responseMessages, hasToolCall);
 
