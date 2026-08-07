@@ -1,4 +1,7 @@
 import { jsonSchema } from "ai";
+import { classifyBashCommand } from "../security/bash-classifier.js";
+import type { HookPipeline } from "../security/hooks.js";
+import { canUseTool, type Role } from "../security/roles.js";
 
 export interface ToolDefinition {
   name: string;
@@ -37,6 +40,8 @@ export class ToolRegistry {
   private waitQueue: Array<() => void> = []; // 阻塞等待中的 resolve 函数
 
   private discoveredTools = new Set<string>();
+  private currentRole: Role = "owner";
+  private hookPipeline?: HookPipeline;
 
   register(...tools: ToolDefinition[]): void {
     for (const tool of tools) {
@@ -93,6 +98,18 @@ export class ToolRegistry {
     this.mcpClients = [];
   }
 
+  setRole(role: Role): void {
+    this.currentRole = role;
+  }
+
+  getRole(): Role {
+    return this.currentRole;
+  }
+
+  setHookPipeline(pipeline: HookPipeline): void {
+    this.hookPipeline = pipeline;
+  }
+
   get(name: string): ToolDefinition | undefined {
     return this.tools.get(name);
   }
@@ -106,13 +123,20 @@ export class ToolRegistry {
       if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
         return false;
       }
+      if (!canUseTool(this.currentRole, tool.name)) {
+        return false;
+      }
       return true;
     });
   }
 
   getDeferredToolSummary(): string {
     const deferred = this.getAll().filter((tool) => {
-      return tool.shouldDefer && !this.discoveredTools.has(tool.name);
+      return (
+        tool.shouldDefer &&
+        !this.discoveredTools.has(tool.name) &&
+        canUseTool(this.currentRole, tool.name)
+      );
     });
 
     if (deferred.length === 0) return "";
@@ -139,7 +163,11 @@ export class ToolRegistry {
 
     for (const name of names) {
       const tool = this.tools.get(name);
-      if (tool && tool.name !== "tool_search") {
+      if (
+        tool &&
+        tool.name !== "tool_search" &&
+        canUseTool(this.currentRole, tool.name)
+      ) {
         results.push(tool);
         this.discoveredTools.add(tool.name);
       }
@@ -153,6 +181,8 @@ export class ToolRegistry {
     let deferred = 0;
 
     for (const tool of this.tools.values()) {
+      if (!canUseTool(this.currentRole, tool.name)) continue;
+
       const schemaSize = JSON.stringify({
         name: tool.name,
         description: tool.description,
@@ -210,11 +240,38 @@ export class ToolRegistry {
       const maxChars = tool.maxResultChars;
       const executeFn = tool.execute;
       const isSafe = tool.isConcurrencySafe === true;
+      const hookPipeline = this.hookPipeline;
+      const toolName = tool.name;
 
       result[tool.name] = {
         description: tool.description,
         inputSchema: jsonSchema(tool.parameters as any),
         execute: async (input: any) => {
+          // Bash 风险检测
+          if (toolName === "bash" && input?.command) {
+            const risk = classifyBashCommand(input.command);
+            if (risk.level === "dangerous") {
+              return `[拒绝执行] 检测到危险操作: ${risk.reason}\n命令: ${input.command}`;
+            }
+            if (risk.level === "moderate") {
+              console.log(`  [安全] ⚠ ${risk.reason}: ${input.command}`);
+            }
+          }
+
+          // Pre Hook
+          if (hookPipeline) {
+            const preResult = await hookPipeline.runPre(toolName, input);
+            if (preResult.action === "block") {
+              return `[Hook 拦截] ${preResult.reason || "操作被阻止"}`;
+            }
+            if (
+              preResult.action === "modify" &&
+              preResult.modifiedInput !== undefined
+            ) {
+              input = preResult.modifiedInput;
+            }
+          }
+
           if (isSafe) {
             await this.acquireConcurrent();
           } else {
@@ -224,7 +281,21 @@ export class ToolRegistry {
             const raw = await executeFn(input);
             const text =
               typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
-            return truncateResult(text, maxChars);
+            let output = truncateResult(text, maxChars);
+
+            // Post Hook
+            if (hookPipeline) {
+              const postResult = await hookPipeline.runPost(
+                toolName,
+                input,
+                output,
+              );
+              if (postResult.modifiedOutput !== undefined) {
+                output = String(postResult.modifiedOutput);
+              }
+            }
+
+            return output;
           } finally {
             if (isSafe) {
               this.releaseConcurrent();

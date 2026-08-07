@@ -2,10 +2,6 @@ const DIMS = 128;
 
 export type EmbeddingFn = (texts: string[]) => Promise<number[][]>;
 
-export function createMockEmbedder(): EmbeddingFn {
-  return async (texts: string[]) => texts.map(mockEmbed);
-}
-
 export function createDashScopeEmbedder(apiKey: string): EmbeddingFn {
   return async (texts: string[]) => {
     const resp = await fetch(
@@ -68,17 +64,6 @@ export async function embed(
   }
 
   return results;
-}
-
-function mockEmbed(text: string): number[] {
-  const vec = new Array(DIMS).fill(0);
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    vec[i % DIMS] += code;
-    vec[(i * 7 + 13) % DIMS] += code * 0.3;
-  }
-  const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-  return vec.map((v) => v / norm);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

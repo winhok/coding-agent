@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import type { CommandContext } from "../src/commands/index.ts";
 import { ragCommands } from "../src/commands/rag.ts";
 import { chunkDocument } from "../src/rag/chunker.ts";
-import { createMockEmbedder } from "../src/rag/embedder.ts";
+import { DIMS, type EmbeddingFn } from "../src/rag/embedder.ts";
 import { importDocuments, ingestDocument } from "../src/rag/ingest.ts";
 import { SqliteVectorStore } from "../src/rag/sqlite-store.ts";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
@@ -15,6 +15,9 @@ const unavailableExtension = {
     throw new Error("sqlite-vec unavailable");
   },
 };
+
+const testEmbedder: EmbeddingFn = async (texts) =>
+  texts.map(() => Array<number>(DIMS).fill(0));
 
 describe("RAG document ingestion", () => {
   it("accepts only the slash-prefixed ingest command", async () => {
@@ -64,23 +67,15 @@ describe("RAG document ingestion", () => {
         source,
         `${"first sentence. ".repeat(100)}\n\nobsolete tail`,
       );
-      const first = await ingestDocument(source, store, createMockEmbedder());
+      const first = await ingestDocument(source, store, testEmbedder);
       assert.equal(first.status, "imported");
       assert.ok(first.chunks > 1);
 
-      const unchanged = await ingestDocument(
-        source,
-        store,
-        createMockEmbedder(),
-      );
+      const unchanged = await ingestDocument(source, store, testEmbedder);
       assert.equal(unchanged.status, "skipped");
 
       fs.writeFileSync(source, "replacement only");
-      const replaced = await ingestDocument(
-        source,
-        store,
-        createMockEmbedder(),
-      );
+      const replaced = await ingestDocument(source, store, testEmbedder);
       assert.equal(replaced.status, "imported");
       assert.equal(store.countSource(source), 1);
       assert.equal(store.keywordSearch("obsolete", 10).length, 0);
@@ -105,7 +100,7 @@ describe("RAG document ingestion", () => {
       const summary = await importDocuments(
         [missing, valid],
         store,
-        createMockEmbedder(),
+        testEmbedder,
       );
       assert.equal(summary.failed.length, 1);
       assert.equal(summary.imported.length, 1);

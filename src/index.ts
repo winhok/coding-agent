@@ -13,6 +13,7 @@ import { type CommandContext, createDispatcher } from "./commands/index.js";
 import { memoryCommands } from "./commands/memory.js";
 import { createPluginCommands } from "./commands/plugin.js";
 import { ragCommands } from "./commands/rag.js";
+import { createSecurityCommands } from "./commands/security.js";
 import { createSkillCommands } from "./commands/skill.js";
 import {
   estimateTokens,
@@ -32,9 +33,10 @@ import { memoryContext, ragContext } from "./context/prompt-pipes.js";
 import { MemoryStore } from "./memory/store.js";
 import { PluginManager } from "./plugins/manager.js";
 import type { PluginDefinition } from "./plugins/types.js";
-import { createDashScopeEmbedder, createMockEmbedder } from "./rag/embedder.js";
+import { createDashScopeEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
+import { HookPipeline } from "./security/hooks.js";
 import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { SkillLoader } from "./skills/loader.js";
 import { allTools } from "./tools/index.ts";
@@ -78,9 +80,7 @@ memoryStore.init();
 registry.register(createMemoryTool(memoryStore));
 
 const vectorStore = new SqliteVectorStore("knowledge.db");
-const embedFn = process.env.DASHSCOPE_API_KEY
-  ? createDashScopeEmbedder(process.env.DASHSCOPE_API_KEY)
-  : createMockEmbedder();
+const embedFn = createDashScopeEmbedder(apiKey);
 registry.register(...createRagTools(vectorStore, embedFn));
 
 const skillLoader = new SkillLoader(".");
@@ -90,6 +90,29 @@ registry.register(createSkillTool(skillLoader));
 // ── Plugins ────────────────────────────────
 const pluginManager = new PluginManager(registry);
 const availablePlugins = new Map<string, PluginDefinition>();
+
+// ── Security: Hook Pipeline ────────────────────────────────
+const hookPipeline = new HookPipeline();
+
+// 示例 Pre Hook: 写文件前记录审计日志
+hookPipeline.registerPre("audit-log", (toolName, input) => {
+  if (toolName === "write_file" || toolName === "edit_file") {
+    const path = (input as { path?: unknown })?.path || "unknown";
+    console.log(`  [audit] 文件写入操作: ${toolName} → ${String(path)}`);
+  }
+  return { action: "allow" };
+});
+
+// 示例 Post Hook: 给 bash 输出加时间戳
+hookPipeline.registerPost("bash-timestamp", (toolName, _input, output) => {
+  if (toolName === "bash") {
+    const timestamp = new Date().toISOString();
+    return { action: "modify", modifiedOutput: `[${timestamp}]\n${output}` };
+  }
+  return { action: "allow" };
+});
+
+registry.setHookPipeline(hookPipeline);
 
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
@@ -210,6 +233,7 @@ async function main() {
     ...createSkillCommands(skillLoader),
     ...createPluginCommands(pluginManager, availablePlugins),
     ...createChannelCommands(gateway),
+    ...createSecurityCommands(registry, hookPipeline),
   ]);
 
   console.log("  启动 Channel...");
@@ -366,8 +390,10 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.16 — Channel (type "/exit" to quit)');
+  console.log('Super Agent v0.17 — Permissions & Hooks (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /role [角色]     — 查看/切换角色 (owner|collaborator|guest)");
+  console.log("  /hooks           — 查看 Hook 管线");
   console.log("  /channel         — 查看通道状态");
   console.log("  /plugin          — 查看插件状态");
   console.log("  /plugin load X   — 加载插件");
@@ -386,6 +412,13 @@ async function main() {
   console.log("  /exit           — 退出");
   console.log("");
   console.log(`  已加载 ${memoryStore.list().length} 条历史记忆`);
+  const role = registry.getRole();
+  const toolCount = registry.getActiveTools().length;
+  const hooks = hookPipeline.list();
+  console.log(`  当前角色: ${role}，可用工具: ${toolCount} 个`);
+  console.log(
+    `  Hook: ${hooks.pre.length} 个 pre + ${hooks.post.length} 个 post`,
+  );
   const pluginList = pluginManager.list();
   if (pluginList.length > 0) {
     console.log(`  已加载 ${pluginList.length} 个插件：`);
