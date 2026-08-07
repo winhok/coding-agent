@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
 import { agentLoop } from "./agent/loop.ts";
+import { terminalAgentEventSink } from "./agent/terminal-event-sink.js";
 import { SubAgentRegistry } from "./agents/registry.js";
 import type { SpawnContext } from "./agents/spawn.js";
 import { FeishuChannel } from "./channels/feishu.js";
@@ -313,7 +314,13 @@ export async function startAgent(): Promise<void> {
           { role: "user", content: prompt },
         ];
         const system = builder.build(makePromptCtx());
-        await agentLoop(model, registry, cronMessages, system);
+        await agentLoop({
+          model,
+          registry,
+          messages: cronMessages,
+          system,
+          eventSink: terminalAgentEventSink,
+        });
         const lastMessage = cronMessages[cronMessages.length - 1];
         if (!lastMessage) return "(无输出)";
         if (typeof lastMessage.content === "string") return lastMessage.content;
@@ -459,13 +466,13 @@ export async function startAgent(): Promise<void> {
       });
       let newMessages: ModelMessage[];
       try {
-        newMessages = await agentLoop(
+        const result = await agentLoop({
           model,
           registry,
           messages,
-          currentSystem,
+          system: currentSystem,
           tracker,
-          async (usage, responseMessages, needsFollowUp) => {
+          onStepUsage: async (usage, responseMessages, needsFollowUp) => {
             const promptTokens = promptTokensFromUsage(usage);
             if (promptTokens > 0) tokenTracker.updateFromAPI(promptTokens);
             tokenTracker.addMessages(responseMessages);
@@ -476,8 +483,10 @@ export async function startAgent(): Promise<void> {
             }
             if (needsFollowUp) await compactIfNeeded();
           },
+          eventSink: terminalAgentEventSink,
           trace,
-        );
+        });
+        newMessages = result.appendedMessages;
         await trace.finish("completed");
         console.log(`  [Trace] ${trace.filePath}`);
       } catch (error) {

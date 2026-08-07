@@ -1,16 +1,21 @@
 import { jsonSchema } from "ai";
-import { classifyBashCommand } from "../security/bash-classifier.js";
 import type { HookPipeline } from "../security/hooks.js";
 import { canUseTool, type Role } from "../security/roles.js";
+import {
+  DEFAULT_MAX_RESULT_CHARS,
+  type ExecutableTool,
+  type ToolExecutionAuditEntry,
+  ToolExecutionPipeline,
+  truncateResult,
+} from "./execution-pipeline.js";
 
-export interface ToolDefinition {
+export interface ToolDefinition extends ExecutableTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
   isConcurrencySafe?: boolean;
   isReadOnly?: boolean;
   maxResultChars?: number;
-  execute: (input: any) => Promise<unknown>;
   shouldDefer?: boolean; // 是否延迟加载
   searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
 }
@@ -28,16 +33,10 @@ export interface MCPToolClient {
   close(): Promise<void>;
 }
 
-const DEFAULT_MAX_RESULT_CHARS = 3000;
-
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
   private mcpClients: MCPToolClient[] = [];
-
-  // 三个状态变量构成一把读写锁
-  private exclusiveLock = false; // 当前是否有独占锁持有者
-  private concurrentCount = 0; // 当前共享锁持有数
-  private waitQueue: Array<() => void> = []; // 阻塞等待中的 resolve 函数
+  private executionPipeline = new ToolExecutionPipeline();
 
   private discoveredTools = new Set<string>();
   private currentRole: Role = "owner";
@@ -116,6 +115,10 @@ export class ToolRegistry {
 
   getAll(): ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  getExecutionAuditLog(): readonly ToolExecutionAuditEntry[] {
+    return this.executionPipeline.getAuditLog();
   }
 
   getActiveTools(): ToolDefinition[] {
@@ -200,38 +203,6 @@ export class ToolRegistry {
     return { active, deferred, total: active + deferred };
   }
 
-  // 获取共享锁：只要没人独占就能拿，多个只读工具可以同时持有
-  private async acquireConcurrent(): Promise<void> {
-    while (this.exclusiveLock) {
-      await new Promise<void>((r) => this.waitQueue.push(r));
-    }
-    this.concurrentCount++;
-  }
-
-  private releaseConcurrent(): void {
-    this.concurrentCount--;
-    if (this.concurrentCount === 0) this.drainQueue();
-  }
-
-  // 获取独占锁：必须等所有共享锁释放、且没人持独占
-  private async acquireExclusive(): Promise<void> {
-    while (this.exclusiveLock || this.concurrentCount > 0) {
-      await new Promise<void>((r) => this.waitQueue.push(r));
-    }
-    this.exclusiveLock = true;
-  }
-
-  private releaseExclusive(): void {
-    this.exclusiveLock = false;
-    this.drainQueue();
-  }
-
-  // 锁释放时把等待队列全唤醒，让它们重新去抢锁
-  private drainQueue(): void {
-    const waiting = this.waitQueue.splice(0);
-    for (const resolve of waiting) resolve();
-  }
-
   private formatTools(
     useLocks: boolean,
     excludeTools?: Set<string>,
@@ -242,77 +213,17 @@ export class ToolRegistry {
     );
 
     for (const tool of activeTools) {
-      const maxChars = tool.maxResultChars;
-      const executeFn = tool.execute;
-      const isSafe = tool.isConcurrencySafe === true;
       const hookPipeline = this.hookPipeline;
-      const toolName = tool.name;
 
       result[tool.name] = {
         description: tool.description,
         inputSchema: jsonSchema(tool.parameters as any),
-        execute: async (input: any) => {
-          // Bash 风险检测
-          if (toolName === "bash" && input?.command) {
-            const risk = classifyBashCommand(input.command);
-            if (risk.level === "dangerous") {
-              return `[拒绝执行] 检测到危险操作: ${risk.reason}\n命令: ${input.command}`;
-            }
-            if (risk.level === "moderate") {
-              console.log(`  [安全] ⚠ ${risk.reason}: ${input.command}`);
-            }
-          }
-
-          // Pre Hook
-          if (hookPipeline) {
-            const preResult = await hookPipeline.runPre(toolName, input);
-            if (preResult.action === "block") {
-              return `[Hook 拦截] ${preResult.reason || "操作被阻止"}`;
-            }
-            if (
-              preResult.action === "modify" &&
-              preResult.modifiedInput !== undefined
-            ) {
-              input = preResult.modifiedInput;
-            }
-          }
-
-          if (useLocks) {
-            if (isSafe) {
-              await this.acquireConcurrent();
-            } else {
-              await this.acquireExclusive();
-            }
-          }
-          try {
-            const raw = await executeFn(input);
-            const text =
-              typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
-            let output = truncateResult(text, maxChars);
-
-            // Post Hook
-            if (hookPipeline) {
-              const postResult = await hookPipeline.runPost(
-                toolName,
-                input,
-                output,
-              );
-              if (postResult.modifiedOutput !== undefined) {
-                output = String(postResult.modifiedOutput);
-              }
-            }
-
-            return output;
-          } finally {
-            if (useLocks) {
-              if (isSafe) {
-                this.releaseConcurrent();
-              } else {
-                this.releaseExclusive();
-              }
-            }
-          }
-        },
+        execute: (input: any) =>
+          this.executionPipeline.execute(tool, input, {
+            useLocks,
+            hookPipeline,
+            authorize: (toolName) => canUseTool(this.currentRole, toolName),
+          }),
       };
     }
     return result;
@@ -327,17 +238,4 @@ export class ToolRegistry {
   }
 }
 
-export function truncateResult(
-  text: string,
-  maxChars: number = DEFAULT_MAX_RESULT_CHARS,
-): string {
-  if (text.length <= maxChars) return text;
-
-  const headSize = Math.floor(maxChars * 0.6);
-  const tailSize = maxChars - headSize;
-  const head = text.slice(0, headSize);
-  const tail = text.slice(-tailSize);
-  const dropped = text.length - headSize - tailSize;
-
-  return `${head}\n\n... [省略 ${dropped} 字符] ...\n\n${tail}`;
-}
+export { truncateResult };

@@ -1,5 +1,6 @@
 import type { LanguageModel, ModelMessage } from "ai";
 import { agentLoop } from "../agent/loop.js";
+import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type {
   ChannelDefinition,
@@ -65,12 +66,13 @@ export class ChannelGateway {
     messages.push(userMsg);
 
     const system = this.options.buildSystem();
-    await agentLoop(
-      this.options.model,
-      this.options.registry,
+    await agentLoop({
+      model: this.options.model,
+      registry: this.options.registry,
       messages,
       system,
-    );
+      eventSink: terminalAgentEventSink,
+    });
 
     const lastMsg = messages[messages.length - 1];
     let replyText = "";

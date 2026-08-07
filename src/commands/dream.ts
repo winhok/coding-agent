@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import { agentLoop } from "../agent/loop.js";
+import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import type { CommandHandler } from "./index.js";
 
 const DREAM_PROMPT = [
@@ -26,19 +27,20 @@ export const dreamCommands: CommandHandler[] = [
     ctx.sessionStore.append(userMessage);
 
     const currentSystem = ctx.builder.build(ctx.makePromptCtx());
-    agentLoop(
-      ctx.model,
-      ctx.registry,
-      ctx.messages,
-      currentSystem,
-      ctx.tracker,
-    ).then((newMessages) => {
+    agentLoop({
+      model: ctx.model,
+      registry: ctx.registry,
+      messages: ctx.messages,
+      system: currentSystem,
+      tracker: ctx.tracker,
+      eventSink: terminalAgentEventSink,
+    }).then(({ appendedMessages }) => {
       const now = Date.now();
-      for (const message of newMessages) {
+      for (const message of appendedMessages) {
         const index = ctx.messages.indexOf(message);
         if (index >= 0) ctx.timestamps.set(index, now);
       }
-      ctx.sessionStore.appendAll(newMessages);
+      ctx.sessionStore.appendAll(appendedMessages);
       console.log("  [dream 完成]\n");
       ctx.ask();
     });
