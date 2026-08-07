@@ -2,12 +2,13 @@
   "name": "coding-agent",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/main.js",
-  "bin": { "coding-agent": "dist/main.js" },
+  "main": "dist/index.js",
+  "bin": { "coding-agent": "dist/index.js" },
   "type": "module",
   "files": ["dist"],
   "scripts": {
     "start": "tsx src/index.ts",
+    "init": "tsx src/index.ts init",
     "continue": "tsx src/index.ts --continue",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "pnpm clean && tsc -b tsconfig.build.json --force",
@@ -27,9 +28,7 @@
     "@biomejs/biome": "2.5.7",
     "@types/better-sqlite3": "^9.6.0",
     "@types/json-schema": "^7.0.15",
-    "@types/marked-terminal": "^6.1.1",
     "@types/node": "^26.1.2",
-    "@types/react": "^19.2.18",
     "lefthook": "^2.1.10",
     "tsx": "^4.23.10",
     "typescript": "^7.0.2"
@@ -37,7 +36,6 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.34",
     "@ai-sdk/openai": "^4.0.34",
-    "@inkjs/ui": "^2.0.0",
     "@larksuiteoapi/node-sdk": "^1.72.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^7.0.56",
@@ -47,15 +45,8 @@
     "dotenv": "^17.4.2",
     "fast-glob": "^3.3.3",
     "globby": "^16.2.2",
-    "ink": "^7.1.1",
-    "ink-big-text": "^2.0.0",
-    "ink-gradient": "^4.0.1",
-    "marked": "^18.0.9",
-    "marked-terminal": "^7.3.0",
     "openai": "^7.4.0",
-    "react": "^19.2.8",
     "sqlite-vec": "^0.1.9",
-    "valtio": "^2.3.2",
     "zod": "^4.4.3"
   }
 }

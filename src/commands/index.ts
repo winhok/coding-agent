@@ -22,7 +22,7 @@ export interface CommandContext {
   ask: () => void;
   replaceMessages: (messages: ModelMessage[]) => void;
   memoryStore: MemoryStore;
-  vectorStore: SqliteVectorStore;
+  vectorStore?: SqliteVectorStore;
   modelName: string;
   modelId: string;
   contextWindowTokens: number;
