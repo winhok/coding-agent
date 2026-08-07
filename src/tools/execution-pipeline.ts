@@ -15,12 +15,21 @@ const SENSITIVE_AUDIT_KEY =
 export interface ExecutableTool {
   name: string;
   parameters: Record<string, unknown>;
+  capabilities?: ToolCapability[];
   isConcurrencySafe?: boolean;
   isReadOnly?: boolean;
+  holdsExecutionLock?: boolean;
   maxResultChars?: number;
   // biome-ignore lint/suspicious/noExplicitAny: registered tools have heterogeneous validated inputs
   execute: (input: any, context?: ToolExecutionContext) => Promise<unknown>;
 }
+
+export type ToolCapability =
+  | "read"
+  | "write"
+  | "execute"
+  | "delegate"
+  | "external";
 
 export interface ToolExecutionContext {
   requestApproval?: RequestApproval;

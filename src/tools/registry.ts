@@ -4,6 +4,7 @@ import { canUseTool, type Role } from "../security/roles.js";
 import {
   DEFAULT_MAX_RESULT_CHARS,
   type ExecutableTool,
+  type ToolCapability,
   type ToolExecutionAuditEntry,
   type ToolExecutionContext,
   ToolExecutionPipeline,
@@ -19,6 +20,13 @@ export interface ToolDefinition extends ExecutableTool {
   maxResultChars?: number;
   shouldDefer?: boolean; // 是否延迟加载
   searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
+}
+
+export interface ToolSelection {
+  allowedCapabilities?: ReadonlySet<ToolCapability>;
+  allowedTools?: ReadonlySet<string>;
+  deniedCapabilities?: ReadonlySet<ToolCapability>;
+  readOnlyOnly?: boolean;
 }
 
 interface MCPTool {
@@ -143,7 +151,7 @@ export class ToolRegistry {
     return this.executionPipeline.getAuditLog();
   }
 
-  getActiveTools(): ToolDefinition[] {
+  getActiveTools(selection?: ToolSelection): ToolDefinition[] {
     return this.getAll().filter((tool) => {
       if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
         return false;
@@ -151,16 +159,17 @@ export class ToolRegistry {
       if (!canUseTool(this.currentRole, tool.name)) {
         return false;
       }
-      return true;
+      return this.matchesSelection(tool, selection);
     });
   }
 
-  getDeferredToolSummary(): string {
+  getDeferredToolSummary(selection?: ToolSelection): string {
     const deferred = this.getAll().filter((tool) => {
       return (
         tool.shouldDefer &&
         !this.discoveredTools.has(tool.name) &&
-        canUseTool(this.currentRole, tool.name)
+        canUseTool(this.currentRole, tool.name) &&
+        this.matchesSelection(tool, selection)
       );
     });
 
@@ -226,14 +235,11 @@ export class ToolRegistry {
   }
 
   private formatTools(
-    useLocks: boolean,
-    excludeTools?: Set<string>,
     executionContext?: ToolExecutionContext,
+    selection?: ToolSelection,
   ): Record<string, any> {
     const result: Record<string, any> = {};
-    const activeTools = this.getActiveTools().filter(
-      (tool) => !excludeTools?.has(tool.name),
-    );
+    const activeTools = this.getActiveTools(selection);
 
     for (const tool of activeTools) {
       const hookPipeline = this.hookPipeline;
@@ -243,9 +249,16 @@ export class ToolRegistry {
         inputSchema: jsonSchema(tool.parameters as any),
         execute: (input: any) =>
           this.executionPipeline.execute(tool, input, {
-            useLocks,
+            useLocks: tool.holdsExecutionLock !== false,
             hookPipeline,
-            authorize: (toolName) => canUseTool(this.currentRole, toolName),
+            authorize: (toolName) => {
+              const currentTool = this.tools.get(toolName);
+              return (
+                currentTool !== undefined &&
+                canUseTool(this.currentRole, toolName) &&
+                this.matchesSelection(currentTool, selection)
+              );
+            },
             requestApproval: executionContext?.requestApproval,
           }),
       };
@@ -253,16 +266,51 @@ export class ToolRegistry {
     return result;
   }
 
-  toAISDKFormatUnlocked(
-    excludeTools?: Set<string>,
+  toAISDKFormat(
     executionContext?: ToolExecutionContext,
+    selection?: ToolSelection,
   ): Record<string, any> {
-    return this.formatTools(false, excludeTools, executionContext);
+    return this.formatTools(executionContext, selection);
   }
 
-  toAISDKFormat(executionContext?: ToolExecutionContext): Record<string, any> {
-    return this.formatTools(true, undefined, executionContext);
+  private matchesSelection(
+    tool: ToolDefinition,
+    selection?: ToolSelection,
+  ): boolean {
+    if (!selection) return true;
+    if (selection.allowedTools && !selection.allowedTools.has(tool.name)) {
+      return false;
+    }
+    if (selection.readOnlyOnly && tool.isReadOnly !== true) return false;
+
+    const capabilities = toolCapabilities(tool);
+    if (
+      selection.deniedCapabilities &&
+      capabilities.some((capability) =>
+        selection.deniedCapabilities?.has(capability),
+      )
+    ) {
+      return false;
+    }
+    if (
+      selection.allowedCapabilities &&
+      !capabilities.every((capability) =>
+        selection.allowedCapabilities?.has(capability),
+      )
+    ) {
+      return false;
+    }
+    return true;
   }
+}
+
+export function toolCapabilities(tool: ToolDefinition): ToolCapability[] {
+  if (tool.capabilities && tool.capabilities.length > 0) {
+    return tool.capabilities;
+  }
+  if (tool.isReadOnly === true) return ["read"];
+  if (tool.isReadOnly === false) return ["write"];
+  return ["external"];
 }
 
 export { truncateResult };

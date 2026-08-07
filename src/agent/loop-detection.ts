@@ -42,105 +42,117 @@ export function hashToolCall(toolName: string, params: unknown): string {
   return `${toolName}:${hash(stableStringify(params))}`;
 }
 
-const history: ToolCallRecord[] = [];
+export class ToolLoopDetector {
+  private history: ToolCallRecord[] = [];
 
-export function recordCall(toolName: string, params: unknown): void {
-  history.push({
-    toolName,
-    argsHash: hashToolCall(toolName, params),
-    timestamp: Date.now(),
-  });
-  if (history.length > HISTORY_SIZE) history.shift();
-}
+  recordCall(toolName: string, params: unknown): void {
+    this.history.push({
+      toolName,
+      argsHash: hashToolCall(toolName, params),
+      timestamp: Date.now(),
+    });
+    if (this.history.length > HISTORY_SIZE) this.history.shift();
+  }
 
-export function resetHistory(): void {
-  history.length = 0;
-}
+  reset(): void {
+    this.history.length = 0;
+  }
 
-function getPingPongCount(currentHash: string): number {
-  if (history.length < 3) return 0;
+  private getPingPongCount(currentHash: string): number {
+    if (this.history.length < 3) return 0;
 
-  const last = history[history.length - 1];
-  if (!last) return 0;
-  let otherHash: string | undefined;
-  for (let i = history.length - 2; i >= 0; i--) {
-    const r = history[i];
-    if (!r) continue;
-    if (r.argsHash !== last.argsHash) {
-      otherHash = r.argsHash;
-      break;
+    const last = this.history[this.history.length - 1];
+    if (!last) return 0;
+    let otherHash: string | undefined;
+    for (let i = this.history.length - 2; i >= 0; i--) {
+      const r = this.history[i];
+      if (!r) continue;
+      if (r.argsHash !== last.argsHash) {
+        otherHash = r.argsHash;
+        break;
+      }
     }
-  }
-  if (!otherHash) return 0;
+    if (!otherHash) return 0;
 
-  let count = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const expected = count % 2 === 0 ? last.argsHash : otherHash;
-    const r = history[i];
-    if (!r) continue;
-    if (r.argsHash !== expected) break;
-    count++;
+    let count = 0;
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const expected = count % 2 === 0 ? last.argsHash : otherHash;
+      const r = this.history[i];
+      if (!r) continue;
+      if (r.argsHash !== expected) break;
+      count++;
+    }
+
+    if (currentHash === otherHash && count >= 2) return count + 1;
+    return 0;
   }
 
-  if (currentHash === otherHash && count >= 2) return count + 1;
-  return 0;
+  detect(toolName: string, params: unknown): DetectionResult {
+    const argsHash = hashToolCall(toolName, params);
+
+    if (this.history.length >= BREAKER_THRESHOLD) {
+      return {
+        stuck: true,
+        level: "critical",
+        detector: "global_circuit_breaker",
+        count: this.history.length,
+        message: `[熔断] 本轮工具调用已达到 ${this.history.length} 次，强制停止`,
+      };
+    }
+
+    const pingPong = this.getPingPongCount(argsHash);
+    if (pingPong >= CRITICAL_THRESHOLD) {
+      return {
+        stuck: true,
+        level: "critical",
+        detector: "ping_pong",
+        count: pingPong,
+        message: `[熔断] 检测到乒乓循环（${pingPong} 次交替），强制停止`,
+      };
+    }
+    if (pingPong >= WARNING_THRESHOLD) {
+      return {
+        stuck: true,
+        level: "warning",
+        detector: "ping_pong",
+        count: pingPong,
+        message: `[警告] 检测到乒乓循环（${pingPong} 次交替），建议换个思路`,
+      };
+    }
+
+    const recentCount = this.history.filter(
+      (h) => h.toolName === toolName && h.argsHash === argsHash,
+    ).length;
+
+    if (recentCount >= CRITICAL_THRESHOLD) {
+      return {
+        stuck: true,
+        level: "critical",
+        detector: "generic_repeat",
+        count: recentCount,
+        message: `[熔断] ${toolName} 相同参数已调用 ${recentCount} 次，强制停止`,
+      };
+    }
+    if (recentCount >= WARNING_THRESHOLD) {
+      return {
+        stuck: true,
+        level: "warning",
+        detector: "generic_repeat",
+        count: recentCount,
+        message: `[警告] ${toolName} 相同参数已调用 ${recentCount} 次，你可能陷入了重复`,
+      };
+    }
+
+    return { stuck: false };
+  }
 }
 
-export function detect(toolName: string, params: unknown): DetectionResult {
-  const argsHash = hashToolCall(toolName, params);
+const defaultDetector = new ToolLoopDetector();
 
-  if (history.length >= BREAKER_THRESHOLD) {
-    return {
-      stuck: true,
-      level: "critical",
-      detector: "global_circuit_breaker",
-      count: history.length,
-      message: `[熔断] 本轮工具调用已达到 ${history.length} 次，强制停止`,
-    };
-  }
+export const recordCall = (toolName: string, params: unknown): void =>
+  defaultDetector.recordCall(toolName, params);
 
-  const pingPong = getPingPongCount(argsHash);
-  if (pingPong >= CRITICAL_THRESHOLD) {
-    return {
-      stuck: true,
-      level: "critical",
-      detector: "ping_pong",
-      count: pingPong,
-      message: `[熔断] 检测到乒乓循环（${pingPong} 次交替），强制停止`,
-    };
-  }
-  if (pingPong >= WARNING_THRESHOLD) {
-    return {
-      stuck: true,
-      level: "warning",
-      detector: "ping_pong",
-      count: pingPong,
-      message: `[警告] 检测到乒乓循环（${pingPong} 次交替），建议换个思路`,
-    };
-  }
+export const resetHistory = (): void => defaultDetector.reset();
 
-  const recentCount = history.filter(
-    (h) => h.toolName === toolName && h.argsHash === argsHash,
-  ).length;
-
-  if (recentCount >= CRITICAL_THRESHOLD) {
-    return {
-      stuck: true,
-      level: "critical",
-      detector: "generic_repeat",
-      count: recentCount,
-      message: `[熔断] ${toolName} 相同参数已调用 ${recentCount} 次，强制停止`,
-    };
-  }
-  if (recentCount >= WARNING_THRESHOLD) {
-    return {
-      stuck: true,
-      level: "warning",
-      detector: "generic_repeat",
-      count: recentCount,
-      message: `[警告] ${toolName} 相同参数已调用 ${recentCount} 次，你可能陷入了重复`,
-    };
-  }
-
-  return { stuck: false };
-}
+export const detect = (toolName: string, params: unknown): DetectionResult =>
+  defaultDetector.detect(toolName, params);

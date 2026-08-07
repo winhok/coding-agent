@@ -20,10 +20,31 @@ describe("config", () => {
 
     assert.equal(config.model.name, "qwen3.7-plus-2026-05-26");
     assert.equal(config.agents.maxConcurrent, 3);
+    assert.deepEqual(config.agents.profiles.explorer?.capabilities, ["read"]);
     assert.equal(config.channels.feishu.enabled, false);
     assert.equal(config.security.defaultRole, "owner");
     assert.equal(config.rag.enabled, true);
     assert.deepEqual(config.mcp.servers, []);
+  });
+
+  it("merges configured sub-agent profiles with built-in defaults", () => {
+    const config = SuperAgentConfigSchema.parse({
+      agents: {
+        profiles: {
+          researcher: {
+            description: "research",
+            systemPrompt: "find evidence",
+            capabilities: ["read", "external"],
+          },
+        },
+      },
+    });
+
+    assert.deepEqual(config.agents.profiles.researcher?.capabilities, [
+      "read",
+      "external",
+    ]);
+    assert.ok(config.agents.profiles.general);
   });
 
   it("substitutes environment variables before validation", () => {

@@ -1,20 +1,25 @@
-import { type LanguageModel, type ModelMessage, streamText } from "ai";
+import type { LanguageModel, ModelMessage } from "ai";
+import { type AgentEvent, agentLoop } from "../agent/loop.js";
 import type { RequestApproval } from "../security/permissions.js";
 import type { ToolRegistry } from "../tools/registry.js";
+import { LocalTraceRecorder } from "../trace/recorder.js";
+import type { UsageTracker } from "../usage/tracker.js";
+import { resolveSubAgentProfile } from "./profiles.js";
 import type { SubAgentRegistry } from "./registry.js";
-import type { SpawnRequest } from "./types.js";
+import type { SpawnRequest, SubAgentProfile } from "./types.js";
 
 export interface SpawnContext {
   model: LanguageModel;
   registry: ToolRegistry;
   agentRegistry: SubAgentRegistry;
-  buildSystem: () => string;
+  profiles: Record<string, SubAgentProfile>;
   currentDepth: number;
+  tracker?: UsageTracker;
   requestApproval?: RequestApproval;
+  traceDirectory?: string;
 }
 
 const MAX_STEPS = 30;
-const EXCLUDED_TOOLS = new Set(["spawn_agent"]);
 
 const AGENT_COLORS = [
   "\x1b[36m",
@@ -30,24 +35,42 @@ function agentTag(index: number, runId: string): string {
   return `${color}[Agent-${index + 1}:${runId}]${RESET}`;
 }
 
-function extractLastAssistantText(messages: ModelMessage[]): string {
-  const lastAssistant = [...messages]
-    .reverse()
-    .find((message) => message.role === "assistant");
-  if (!lastAssistant) return "";
-  if (typeof lastAssistant.content === "string") return lastAssistant.content;
-  if (!Array.isArray(lastAssistant.content)) return "";
-  return lastAssistant.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("");
+function buildSubAgentSystem(
+  profileName: string,
+  profile: SubAgentProfile,
+  registry: ToolRegistry,
+  selection: Parameters<ToolRegistry["getActiveTools"]>[0],
+): string {
+  const activeTools = registry
+    .getActiveTools(selection)
+    .map((tool) => tool.name)
+    .join(", ");
+  const deferred = registry.getDeferredToolSummary(selection);
+  return [
+    `你是独立执行单个任务的子 Agent，Profile 为 ${profileName}。`,
+    profile.systemPrompt,
+    "只处理收到的任务；不要假设主 Agent 的对话历史。需要多个独立信息时可并行调用工具。",
+    `当前工作目录：${process.cwd()}`,
+    `当前可见工具：${activeTools || "无"}`,
+    deferred,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export async function spawnAgent(
   request: SpawnRequest,
   ctx: SpawnContext,
   index = 0,
+  parallel = false,
 ): Promise<string> {
+  let resolved: ReturnType<typeof resolveSubAgentProfile>;
+  try {
+    resolved = resolveSubAgentProfile(request, ctx.profiles, parallel);
+  } catch (error) {
+    return `[spawn] 拒绝: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
   const { ok, reason } = ctx.agentRegistry.canSpawn(ctx.currentDepth);
   if (!ok) return `[spawn] 拒绝: ${reason}`;
 
@@ -57,6 +80,7 @@ export async function spawnAgent(
   ctx.agentRegistry.register({
     id: runId,
     task: request.task,
+    profile: resolved.name,
     status: "running",
     depth: ctx.currentDepth + 1,
     startedAt: new Date().toISOString(),
@@ -65,65 +89,70 @@ export async function spawnAgent(
   const timeout =
     request.timeout || ctx.agentRegistry.getConfig().defaultTimeout;
   const controller = new AbortController();
-  console.log(`  ${tag} 启动: ${request.task.slice(0, 50)}`);
+  const timer = setTimeout(() => controller.abort(), timeout);
+  let partialText = "";
+  let trace: LocalTraceRecorder | undefined;
+
+  const eventSink = (event: AgentEvent): void => {
+    switch (event.type) {
+      case "step_started":
+        partialText = "";
+        console.log(`  ${tag} Step ${event.step}/${MAX_STEPS}`);
+        break;
+      case "text_delta":
+        partialText += event.text;
+        break;
+      case "tool_started":
+        console.log(
+          `  ${tag} 调用 ${event.tool}(${JSON.stringify(event.input).slice(0, 80)})`,
+        );
+        break;
+      case "loop_detected":
+        console.log(`  ${tag} ${event.message}`);
+        break;
+      case "retry_scheduled":
+        console.log(
+          `  ${tag} 模型调用重试 ${event.attempt}/${event.maxRetries}`,
+        );
+        break;
+    }
+  };
 
   try {
-    const system = `${ctx.buildSystem()}\n\n[子 Agent 模式] 你是一个被派出去执行具体任务的子 Agent。直接完成任务并输出结论，保持简洁。\n当你需要同时获取多个独立信息时（比如读多个文件、搜多个关键词），尽可能在一次回复中并行调用多个工具，不要一个个串行调。`;
-    const tools = ctx.registry.toAISDKFormatUnlocked(
-      EXCLUDED_TOOLS,
-      ctx.requestApproval
-        ? { requestApproval: ctx.requestApproval }
-        : undefined,
+    trace = await LocalTraceRecorder.start({
+      ...(ctx.traceDirectory ? { directory: ctx.traceDirectory } : {}),
+      sessionId: runId,
+      model: typeof ctx.model === "string" ? ctx.model : ctx.model.modelId,
+    });
+    ctx.agentRegistry.attachTrace(runId, trace.filePath);
+    console.log(
+      `  ${tag} 启动 [${resolved.name}${parallel ? ", 并行只读" : ""}]: ${request.task.slice(0, 50)}`,
     );
-    const timer = setTimeout(() => controller.abort(), timeout);
-
-    try {
-      let step = 0;
-      while (step < MAX_STEPS) {
-        step++;
-        const isLastStep = step === MAX_STEPS;
-        console.log(
-          `  ${tag} Step ${step}/${MAX_STEPS}${isLastStep ? " (总结)" : ""}`,
-        );
-        if (isLastStep) {
-          messages.push({
-            role: "user",
-            content:
-              "你已经收集了足够的信息。请直接输出文字总结，不要再调用任何工具。",
-          });
-        }
-
-        const result = streamText({
-          model: ctx.model,
-          system,
-          tools,
-          toolChoice: isLastStep ? "none" : "auto",
-          messages,
-          maxRetries: 0,
-          abortSignal: controller.signal,
-          providerOptions: { openai: { parallelToolCalls: true } },
-          onError: () => {},
-        });
-        let hasToolCall = false;
-        for await (const part of result.stream) {
-          if (part.type === "tool-call") {
-            hasToolCall = true;
-            const argsPreview = JSON.stringify(part.input).slice(0, 80);
-            console.log(`  ${tag} 调用 ${part.toolName}(${argsPreview})`);
-          }
-        }
-
-        const finalStep = await result.finalStep;
-        messages.push(...finalStep.response.messages);
-        if (!hasToolCall) break;
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-
-    const output = extractLastAssistantText(messages) || "(无输出)";
-    ctx.agentRegistry.complete(runId, output);
-    console.log(`  ${tag} 完成 ✓ (${output.length} 字符)`);
+    const result = await agentLoop({
+      model: ctx.model,
+      registry: ctx.registry,
+      messages,
+      system: buildSubAgentSystem(
+        resolved.name,
+        resolved.profile,
+        ctx.registry,
+        resolved.selection,
+      ),
+      ...(ctx.tracker ? { tracker: ctx.tracker } : {}),
+      eventSink,
+      ...(trace ? { trace } : {}),
+      maxSteps: MAX_STEPS,
+      ...(ctx.requestApproval ? { requestApproval: ctx.requestApproval } : {}),
+      toolSelection: resolved.selection,
+      abortSignal: controller.signal,
+      forceFinalStep: true,
+    });
+    const output = result.text || "(无输出)";
+    ctx.agentRegistry.complete(runId, output, result.stats);
+    await trace.finish("completed");
+    console.log(
+      `  ${tag} 完成 ✓ (${result.stats.steps} steps, ${result.stats.toolCalls} tools, ${output.length} 字符)`,
+    );
     return output;
   } catch (error) {
     const isAbort =
@@ -135,13 +164,12 @@ export async function spawnAgent(
         ? error.message
         : String(error);
     ctx.agentRegistry.fail(runId, errorMessage, isAbort);
+    await trace?.finish(isAbort ? "cancelled" : "failed", error);
     console.log(`  ${tag} ${isAbort ? "超时" : "失败"} ✗: ${errorMessage}`);
-
-    if (isAbort) {
-      const partial = extractLastAssistantText(messages);
-      if (partial) return `[部分结果] ${partial}`;
-    }
+    if (isAbort && partialText) return `[部分结果] ${partialText}`;
     return `[sub-agent 执行失败] ${errorMessage}`;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -165,11 +193,11 @@ export async function spawnParallel(
       `  ⚠ 请求 ${requests.length} 个子 Agent，但最大并发为 ${maxConcurrent}，只执行前 ${toRun.length} 个`,
     );
   }
-  console.log(`\n  ┌─ 派发 ${toRun.length} 个子 Agent 并行执行 ─┐`);
+  console.log(`\n  ┌─ 派发 ${toRun.length} 个只读子 Agent 并行执行 ─┐`);
   const results = await Promise.all(
     toRun.map(async (request, index) => ({
       task: request.task,
-      result: await spawnAgent(request, ctx, index),
+      result: await spawnAgent(request, ctx, index, true),
     })),
   );
   for (const request of rejected) {

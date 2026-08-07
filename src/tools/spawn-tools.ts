@@ -24,12 +24,31 @@ export function createSpawnTool(
           items: { type: "string" },
           description: "多个任务描述，并行执行（与 task 二选一）",
         },
+        profile: {
+          type: "string",
+          description:
+            "子 Agent Profile 名称。单任务默认 general，并行任务默认 explorer",
+        },
+        tools: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选的任务级工具范围，只能缩小 Profile 权限",
+        },
+        timeout: { type: "number", description: "可选超时时间（毫秒）" },
       },
     },
     isConcurrencySafe: false,
     isReadOnly: true,
+    capabilities: ["delegate"],
+    holdsExecutionLock: false,
     execute: async (
-      input: { task?: string; tasks?: string[] },
+      input: {
+        task?: string;
+        tasks?: string[];
+        profile?: string;
+        tools?: string[];
+        timeout?: number;
+      },
       executionContext?: ToolExecutionContext,
     ) => {
       const context = {
@@ -41,7 +60,12 @@ export function createSpawnTool(
 
       if (input.tasks && input.tasks.length > 0) {
         const results = await spawnParallel(
-          input.tasks.map((task) => ({ task })),
+          input.tasks.map((task) => ({
+            task,
+            ...(input.profile ? { profile: input.profile } : {}),
+            ...(input.tools ? { tools: input.tools } : {}),
+            ...(input.timeout ? { timeout: input.timeout } : {}),
+          })),
           context,
         );
         return results
@@ -52,7 +76,17 @@ export function createSpawnTool(
           .join("\n\n---\n\n");
       }
 
-      if (input.task) return spawnAgent({ task: input.task }, context);
+      if (input.task) {
+        return spawnAgent(
+          {
+            task: input.task,
+            ...(input.profile ? { profile: input.profile } : {}),
+            ...(input.tools ? { tools: input.tools } : {}),
+            ...(input.timeout ? { timeout: input.timeout } : {}),
+          },
+          context,
+        );
+      }
       return "需要提供 task 或 tasks 参数";
     },
   };

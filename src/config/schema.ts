@@ -74,11 +74,57 @@ export const ChannelConfigSchema = z.object({
   feishu: FeishuChannelConfigSchema.prefault({}),
 });
 
-export const AgentConfigSchema = z.object({
-  maxSpawnDepth: z.number().min(0).max(5).default(1),
-  maxConcurrent: z.number().min(1).max(10).default(3),
-  defaultTimeout: z.number().positive().default(60_000),
+export const ToolCapabilitySchema = z.enum([
+  "read",
+  "write",
+  "execute",
+  "delegate",
+  "external",
+]);
+
+export const AgentProfileConfigSchema = z.object({
+  description: z.string().default(""),
+  systemPrompt: z.string().default(""),
+  capabilities: z.array(ToolCapabilitySchema).min(1),
+  tools: z.array(z.string().min(1)).optional(),
 });
+
+type AgentProfileConfig = z.infer<typeof AgentProfileConfigSchema>;
+
+export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfileConfig> = {
+  general: {
+    description: "通用单任务执行者",
+    systemPrompt: "自主完成指定任务，并返回简洁、可验证的结果。",
+    capabilities: ["read", "write", "execute", "delegate", "external"],
+  },
+  explorer: {
+    description: "只读代码与资料探索者",
+    systemPrompt: "只进行检索、阅读和分析，不修改任何状态。结论必须指出依据。",
+    capabilities: ["read"],
+  },
+  editor: {
+    description: "代码实现者",
+    systemPrompt: "先理解现有实现，再完成必要修改并进行相称的验证。",
+    capabilities: ["read", "write", "execute"],
+  },
+  reviewer: {
+    description: "只读审查者",
+    systemPrompt: "审查正确性、安全性和测试缺口，只报告有证据的问题。",
+    capabilities: ["read"],
+  },
+};
+
+export const AgentConfigSchema = z
+  .object({
+    maxSpawnDepth: z.number().min(0).max(5).default(1),
+    maxConcurrent: z.number().min(1).max(10).default(3),
+    defaultTimeout: z.number().positive().default(60_000),
+    profiles: z.record(z.string().min(1), AgentProfileConfigSchema).default({}),
+  })
+  .transform((value) => ({
+    ...value,
+    profiles: { ...DEFAULT_AGENT_PROFILES, ...value.profiles },
+  }));
 
 export const SecurityConfigSchema = z.object({
   defaultRole: z.enum(["owner", "collaborator", "guest"]).default("owner"),

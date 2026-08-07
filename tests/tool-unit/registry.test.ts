@@ -117,16 +117,7 @@ describe("tool-unit registry", () => {
     });
   });
 
-  it("provides an unlocked snapshot that excludes spawn_agent", async () => {
-    let releaseParent!: () => void;
-    let parentStarted!: () => void;
-    const parentStartedPromise = new Promise<void>((resolve) => {
-      parentStarted = resolve;
-    });
-    const releaseParentPromise = new Promise<void>((resolve) => {
-      releaseParent = resolve;
-    });
-
+  it("filters tools by capabilities and task-level scope", () => {
     const registry = new ToolRegistry();
     registry.register(
       {
@@ -134,11 +125,9 @@ describe("tool-unit registry", () => {
         description: "parent spawn",
         parameters: { type: "object", properties: {} },
         isReadOnly: true,
-        execute: async () => {
-          parentStarted();
-          await releaseParentPromise;
-          return "parent";
-        },
+        capabilities: ["delegate"],
+        holdsExecutionLock: false,
+        execute: async () => "parent",
       },
       {
         name: "child_read",
@@ -147,20 +136,56 @@ describe("tool-unit registry", () => {
         isReadOnly: true,
         execute: async () => "child",
       },
+      {
+        name: "child_write",
+        description: "child write",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: false,
+        execute: async () => "write",
+      },
     );
 
-    const locked = registry.toAISDKFormat();
-    const parent = locked.spawn_agent;
-    assert.ok(parent);
-    const parentPromise = parent.execute({});
-    await parentStartedPromise;
+    const selected = registry.toAISDKFormat(undefined, {
+      allowedCapabilities: new Set(["read"]),
+      deniedCapabilities: new Set(["delegate"]),
+      allowedTools: new Set(["child_read", "child_write"]),
+    });
 
-    const unlocked = registry.toAISDKFormatUnlocked(new Set(["spawn_agent"]));
-    assert.equal(unlocked.spawn_agent, undefined);
-    assert.equal(await unlocked.child_read?.execute({}), "child");
+    assert.deepEqual(Object.keys(selected), ["child_read"]);
+  });
 
-    releaseParent();
-    assert.equal(await parentPromise, "parent");
+  it("does not let the orchestration tool hold the child execution lock", async () => {
+    let childRan = false;
+    const registry = new ToolRegistry();
+    const childRead: ToolDefinition = {
+      name: "child_read",
+      description: "child read",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => {
+        childRan = true;
+        return "child";
+      },
+    };
+    registry.register(childRead, {
+      name: "spawn_agent",
+      description: "spawn",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      capabilities: ["delegate"],
+      holdsExecutionLock: false,
+      execute: async () => {
+        const child = registry.toAISDKFormat().child_read;
+        assert.ok(child);
+        return child.execute({});
+      },
+    });
+
+    assert.equal(
+      await registry.toAISDKFormat().spawn_agent?.execute({}),
+      "child",
+    );
+    assert.equal(childRan, true);
   });
 
   it("registers MCP tools as deferred, serialized unknown capabilities", async () => {

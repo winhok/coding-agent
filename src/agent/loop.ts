@@ -6,7 +6,7 @@ import {
   streamText,
 } from "ai";
 import type { RequestApproval } from "../security/permissions.js";
-import type { ToolRegistry } from "../tools/registry.js";
+import type { ToolRegistry, ToolSelection } from "../tools/registry.js";
 import type { LocalTraceRecorder } from "../trace/recorder.js";
 import {
   normalizeUsage,
@@ -19,7 +19,7 @@ import type {
   AgentLoopStats,
   AgentLoopTermination,
 } from "./events.js";
-import { detect, recordCall, resetHistory } from "./loop-detection.js";
+import { ToolLoopDetector } from "./loop-detection.js";
 import { calculateDelay, isRetryable, sleep } from "./retry.js";
 
 const MAX_STEPS = 50;
@@ -41,6 +41,9 @@ export interface AgentLoopOptions {
   maxSteps?: number;
   maxRetries?: number;
   requestApproval?: RequestApproval;
+  toolSelection?: ToolSelection;
+  abortSignal?: AbortSignal;
+  forceFinalStep?: boolean;
 }
 
 const EMPTY_USAGE: StepUsage = {
@@ -62,6 +65,9 @@ export async function agentLoop({
   maxSteps = MAX_STEPS,
   maxRetries = MAX_RETRIES,
   requestApproval,
+  toolSelection,
+  abortSignal,
+  forceFinalStep = false,
 }: AgentLoopOptions): Promise<AgentLoopResult> {
   let step = 0;
   let toolCalls = 0;
@@ -70,7 +76,7 @@ export async function agentLoop({
   let termination: AgentLoopTermination | undefined;
   const totalUsage = { ...EMPTY_USAGE };
   const appendedMessages: ModelMessage[] = [];
-  resetHistory();
+  const loopDetector = new ToolLoopDetector();
 
   const emit = async (event: Parameters<AgentEventSink>[0]) => {
     await eventSink?.(event);
@@ -81,6 +87,16 @@ export async function agentLoop({
   try {
     while (step < maxSteps) {
       step++;
+      const isLastStep = forceFinalStep && step === maxSteps;
+      if (isLastStep) {
+        const finalInstruction: ModelMessage = {
+          role: "user",
+          content:
+            "你已经收集了足够的信息。请直接输出文字总结，不要再调用任何工具。",
+        };
+        messages.push(finalInstruction);
+        appendedMessages.push(finalInstruction);
+      }
       await emit({ type: "step_started", step });
 
       await trace?.recordStepStarted({ step, system, messages });
@@ -98,9 +114,12 @@ export async function agentLoop({
             system,
             tools: registry.toAISDKFormat(
               requestApproval ? { requestApproval } : undefined,
+              toolSelection,
             ),
+            toolChoice: isLastStep ? "none" : "auto",
             messages,
             maxRetries: 0,
+            ...(abortSignal ? { abortSignal } : {}),
             providerOptions: { openai: { parallelToolCalls: true } },
             onError: () => {},
           });
@@ -122,7 +141,10 @@ export async function agentLoop({
                   input: part.input,
                 });
 
-                const detection = detect(part.toolName, part.input);
+                const detection = loopDetector.detect(
+                  part.toolName,
+                  part.input,
+                );
                 if (detection.stuck) {
                   await emit({
                     type: "loop_detected",
@@ -141,7 +163,7 @@ export async function agentLoop({
                     appendedMessages.push(warningMessage);
                   }
                 }
-                recordCall(part.toolName, part.input);
+                loopDetector.recordCall(part.toolName, part.input);
                 break;
               }
 

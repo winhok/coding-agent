@@ -314,8 +314,10 @@ export async function startAgent(): Promise<void> {
       model,
       registry,
       agentRegistry,
-      buildSystem: () => builder.build(makePromptCtx()),
+      profiles: config.agents.profiles,
       currentDepth: 0,
+      tracker,
+      requestApproval,
     };
   }
 

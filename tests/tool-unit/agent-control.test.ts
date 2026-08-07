@@ -6,6 +6,7 @@ import {
   hashToolCall,
   recordCall,
   resetHistory,
+  ToolLoopDetector,
 } from "../../src/agent/loop-detection.ts";
 import { calculateDelay, isRetryable } from "../../src/agent/retry.ts";
 
@@ -63,6 +64,19 @@ describe("tool-unit agent control", () => {
     } finally {
       resetHistory();
     }
+  });
+
+  it("isolates loop history between concurrent agent runs", () => {
+    const noisyRun = new ToolLoopDetector();
+    const cleanRun = new ToolLoopDetector();
+    for (let i = 0; i < 10; i++) {
+      noisyRun.recordCall("read_file", { path: "same.ts" });
+    }
+
+    assert.equal(noisyRun.detect("read_file", { path: "same.ts" }).stuck, true);
+    assert.deepEqual(cleanRun.detect("read_file", { path: "same.ts" }), {
+      stuck: false,
+    });
   });
 
   it("classifies retryable and non-retryable errors", () => {

@@ -26,6 +26,7 @@ export const bashTool: ToolDefinition = {
   },
   isConcurrencySafe: false,
   isReadOnly: false,
+  capabilities: ["execute"],
   maxResultChars: MAX_OUTPUT_LENGTH,
   execute: async (input: { command?: unknown; timeout?: unknown }) => {
     const command = input.command;

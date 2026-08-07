@@ -37,12 +37,18 @@ export class SubAgentRegistry {
     this.runs.set(run.id, run);
   }
 
-  complete(id: string, result: string): void {
+  complete(id: string, result: string, stats?: SubAgentRun["stats"]): void {
     const run = this.runs.get(id);
     if (!run) return;
     run.status = "completed";
     run.result = result;
+    if (stats) run.stats = stats;
     run.finishedAt = new Date().toISOString();
+  }
+
+  attachTrace(id: string, tracePath: string): void {
+    const run = this.runs.get(id);
+    if (run) run.tracePath = tracePath;
   }
 
   fail(id: string, error: string, timedOut = false): void {

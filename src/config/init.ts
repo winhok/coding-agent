@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { CONFIG_FILE } from "./loader.js";
+import { DEFAULT_AGENT_PROFILES } from "./schema.js";
 
 function envReference(name: string): string {
   return `\${${name}}`;
@@ -63,7 +64,12 @@ export async function runInit(): Promise<void> {
         port: 3000,
       },
     },
-    agents: { maxSpawnDepth: 1, maxConcurrent, defaultTimeout: 60_000 },
+    agents: {
+      maxSpawnDepth: 1,
+      maxConcurrent,
+      defaultTimeout: 60_000,
+      profiles: DEFAULT_AGENT_PROFILES,
+    },
     security: { defaultRole: "owner", auditLog: true, bashTimestamp: true },
     memory: { dataDir: "." },
     rag: { enabled: true, docsDir: "docs" },

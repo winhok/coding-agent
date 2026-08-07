@@ -30,9 +30,14 @@ export function createAgentCommands(
             ? "执行中..."
             : run.error;
       console.log(
-        `    ${icon} ${run.id} (depth=${run.depth}) — ${run.task.slice(0, 40)}`,
+        `    ${icon} ${run.id} [${run.profile}] (depth=${run.depth}) — ${run.task.slice(0, 40)}`,
       );
       console.log(`      ${detail}`);
+      if (run.stats) {
+        console.log(
+          `      ${run.stats.steps} steps · ${run.stats.toolCalls} tools · ${run.stats.retries} retries`,
+        );
+      }
     }
 
     const config = agentRegistry.getConfig();
