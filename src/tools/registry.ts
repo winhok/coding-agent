@@ -58,43 +58,65 @@ export class ToolRegistry {
     serverName: string,
     client: MCPToolClient,
   ): Promise<string[]> {
-    await client.connect();
-    this.mcpClients.push(client);
+    try {
+      await client.connect();
+      const tools = await client.listTools();
+      const registered: string[] = [];
 
-    const tools = await client.listTools();
-    const registered: string[] = [];
+      for (const tool of tools) {
+        const prefixedName = `mcp__${serverName}__${tool.name}`;
+        if (this.tools.has(prefixedName)) continue;
 
-    for (const tool of tools) {
-      const prefixedName = `mcp__${serverName}__${tool.name}`;
-      if (this.tools.has(prefixedName)) continue;
+        const toolClient = client;
+        const originalName = tool.name;
 
-      const toolClient = client;
-      const originalName = tool.name;
+        this.register({
+          name: prefixedName,
+          description: `[MCP:${serverName}] ${tool.description}`,
+          parameters: tool.inputSchema as Record<string, unknown>,
+          isConcurrencySafe: false,
+          maxResultChars: DEFAULT_MAX_RESULT_CHARS,
+          shouldDefer: true,
+          searchHint: `${serverName} ${tool.name} ${tool.description}`,
+          execute: async (input: any) => {
+            return toolClient.callTool(originalName, input);
+          },
+        });
 
-      this.register({
-        name: prefixedName,
-        description: `[MCP:${serverName}] ${tool.description}`,
-        parameters: tool.inputSchema as Record<string, unknown>,
-        isConcurrencySafe: true,
-        maxResultChars: DEFAULT_MAX_RESULT_CHARS,
-        shouldDefer: true,
-        searchHint: `${serverName} ${tool.name} ${tool.description}`,
-        execute: async (input: any) => {
-          return toolClient.callTool(originalName, input);
-        },
-      });
+        registered.push(prefixedName);
+      }
 
-      registered.push(prefixedName);
+      this.mcpClients.push(client);
+      return registered;
+    } catch (error) {
+      try {
+        await client.close();
+      } catch {
+        // Preserve the connection/discovery error that made registration fail.
+      }
+      throw error;
     }
-
-    return registered;
   }
 
   async closeAllMCP(): Promise<void> {
-    for (const client of this.mcpClients) {
-      await client.close();
+    const clients = this.mcpClients.splice(0);
+    const results = await Promise.allSettled(
+      clients.map((client) => client.close()),
+    );
+    const failures = results
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      const detail = failures
+        .map((failure) =>
+          failure instanceof Error ? failure.message : String(failure),
+        )
+        .join("; ");
+      throw new AggregateError(
+        failures,
+        `Failed to close MCP clients: ${detail}`,
+      );
     }
-    this.mcpClients = [];
   }
 
   setRole(role: Role): void {

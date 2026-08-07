@@ -54,6 +54,7 @@ export async function runInit(): Promise<void> {
       apiKey: envReference("DASHSCOPE_API_KEY"),
     },
     plugins: [],
+    mcp: { servers: [] },
     channels: {
       feishu: {
         enabled: enableFeishu,

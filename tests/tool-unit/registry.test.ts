@@ -163,7 +163,7 @@ describe("tool-unit registry", () => {
     assert.equal(await parentPromise, "parent");
   });
 
-  it("registers MCP tools as deferred concurrency-safe unknown capabilities", async () => {
+  it("registers MCP tools as deferred, serialized unknown capabilities", async () => {
     const registry = new ToolRegistry();
 
     await registry.registerMCPServer("github", {
@@ -182,7 +182,7 @@ describe("tool-unit registry", () => {
     const tool = registry.get("mcp__github__create_issue");
 
     assert.equal(tool?.isReadOnly, undefined);
-    assert.equal(tool?.isConcurrencySafe, true);
+    assert.equal(tool?.isConcurrencySafe, false);
     assert.equal(tool?.shouldDefer, true);
   });
 
@@ -257,7 +257,7 @@ describe("tool-unit registry", () => {
     assert.deepEqual(registry.getActiveTools(), []);
   });
 
-  it("tracks a connected MCP client for cleanup when tool discovery fails", async () => {
+  it("closes and forgets an MCP client when tool discovery fails", async () => {
     const registry = new ToolRegistry();
     let closed = false;
 
@@ -276,10 +276,33 @@ describe("tool-unit registry", () => {
       /list failed/,
     );
 
-    assert.equal(closed, false);
+    assert.equal(closed, true);
 
     await registry.closeAllMCP();
 
     assert.equal(closed, true);
+  });
+
+  it("attempts to close every MCP client even when one close fails", async () => {
+    const registry = new ToolRegistry();
+    const closed: string[] = [];
+
+    for (const name of ["first", "second"]) {
+      await registry.registerMCPServer(name, {
+        connect: async () => {},
+        listTools: async () => [],
+        callTool: async () => "unused",
+        close: async () => {
+          closed.push(name);
+          if (name === "first") throw new Error("close failed");
+        },
+      });
+    }
+
+    await assert.rejects(() => registry.closeAllMCP(), /close failed/);
+    assert.deepEqual(closed, ["first", "second"]);
+
+    await registry.closeAllMCP();
+    assert.deepEqual(closed, ["first", "second"]);
   });
 });

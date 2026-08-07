@@ -15,6 +15,54 @@ export const PluginConfigSchema = z.object({
   config: z.record(z.string(), z.string()).default({}),
 });
 
+const MCPServerBaseSchema = {
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(
+      /^[A-Za-z0-9_-]+$/,
+      "MCP server name may only contain letters, numbers, underscores, and hyphens",
+    ),
+  enabled: z.boolean().default(true),
+};
+
+export const MCPServerConfigSchema = z.discriminatedUnion("type", [
+  z.object({
+    ...MCPServerBaseSchema,
+    type: z.literal("stdio"),
+    command: z.string().trim().min(1),
+    args: z.array(z.string()).default([]),
+    env: z.record(z.string(), z.string()).default({}),
+  }),
+  z.object({
+    ...MCPServerBaseSchema,
+    type: z.literal("http"),
+    url: z.string().url(),
+    headers: z.record(z.string(), z.string()).default({}),
+    requestTimeoutMs: z.number().positive().optional(),
+  }),
+]);
+
+const MCPServersSchema = z
+  .array(MCPServerConfigSchema)
+  .default([])
+  .superRefine((servers, ctx) => {
+    const seen = new Set<string>();
+    for (const [index, server] of servers.entries()) {
+      if (seen.has(server.name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "name"],
+          message: "MCP server name must be unique",
+        });
+      }
+      seen.add(server.name);
+    }
+  });
+
+export const MCPConfigSchema = z.object({ servers: MCPServersSchema });
+
 export const FeishuChannelConfigSchema = z.object({
   enabled: z.boolean().default(false),
   appId: z.string().default(""),
@@ -64,6 +112,7 @@ export const SuperAgentConfigSchema = z.object({
   version: z.string().default("1.0"),
   model: ModelConfigSchema.prefault({}),
   plugins: z.array(PluginConfigSchema).default([]),
+  mcp: MCPConfigSchema.prefault({}),
   channels: ChannelConfigSchema.prefault({}),
   agents: AgentConfigSchema.prefault({}),
   security: SecurityConfigSchema.prefault({}),
@@ -75,3 +124,4 @@ export const SuperAgentConfigSchema = z.object({
 });
 
 export type SuperAgentConfig = z.infer<typeof SuperAgentConfigSchema>;
+export type MCPServerConfig = z.infer<typeof MCPServerConfigSchema>;

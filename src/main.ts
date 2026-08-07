@@ -53,7 +53,7 @@ import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { SkillLoader } from "./skills/loader.js";
 import { createCronTool } from "./tools/cron-tools.js";
 import { allTools } from "./tools/index.ts";
-import { MCPClient } from "./tools/mcp-client.ts";
+import { connectMCPServers } from "./tools/mcp-connect.js";
 import { createMemoryTool } from "./tools/memory-tools.js";
 import { createRagTools } from "./tools/rag-tools.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -167,28 +167,40 @@ const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
 export async function connectMCP(targetRegistry = registry) {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+  const configuredServers = [...config.mcp.servers];
+  const hasConfiguredGitHub = configuredServers.some(
+    (server) => server.name === "github",
+  );
 
-  if (!githubToken) {
-    console.log("\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，跳过 GitHub MCP");
-    return [];
-  }
-
-  console.log(`\n连接 GitHub MCP Server: ${GITHUB_MCP_REMOTE_URL}`);
-  try {
-    const client = new MCPClient({
+  if (githubToken && !hasConfiguredGitHub) {
+    configuredServers.unshift({
+      name: "github",
+      enabled: true,
       type: "http",
       url: GITHUB_MCP_REMOTE_URL,
       headers: { Authorization: `Bearer ${githubToken}` },
     });
-    const tools = await targetRegistry.registerMCPServer("github", client);
-    console.log(`  已注册 ${tools.length} 个 MCP 工具`);
-    return tools;
-  } catch (err) {
+  }
+
+  if (configuredServers.length === 0) {
     console.log(
-      `  MCP 连接失败，已跳过 GitHub MCP: ${err instanceof Error ? err.message : err}`,
+      "\n未配置 MCP Server，且未设置 GITHUB_PERSONAL_ACCESS_TOKEN，跳过 MCP",
     );
     return [];
   }
+
+  console.log("\n连接 MCP Servers:");
+  const results = await connectMCPServers(configuredServers, targetRegistry);
+  const connectedTools: string[] = [];
+  for (const result of results) {
+    if (result.status === "connected") {
+      connectedTools.push(...result.tools);
+      console.log(`  ✓ ${result.name} — ${result.tools.length} 个工具`);
+    } else {
+      console.log(`  ✗ ${result.name} — ${result.error}`);
+    }
+  }
+  return connectedTools;
 }
 
 async function importNewDocuments(): Promise<void> {
@@ -518,7 +530,13 @@ export async function startAgent(): Promise<void> {
         cronService?.stop();
         await gateway.stopAll();
         await pluginManager.unloadAll();
-        await registry.closeAllMCP();
+        try {
+          await registry.closeAllMCP();
+        } catch (error) {
+          console.error(
+            `  [MCP] 关闭连接失败: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
         vectorStore?.close();
         rl.close();
         return;
