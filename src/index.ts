@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-const command = process.argv[2];
+import { CLI_EXIT, runCli } from "./cli/run.js";
 
-if (command === "init") {
-  import("./config/init.js").then((module) => module.runInit());
-} else {
-  import("./main.js").then((module) =>
-    module.startAgent().catch(console.error),
-  );
+const exitCode = await runCli(process.argv.slice(2));
+if (
+  process.exitCode !== CLI_EXIT.interrupted &&
+  process.exitCode !== CLI_EXIT.terminated
+) {
+  process.exitCode = exitCode;
 }

@@ -3,12 +3,18 @@ import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
-import { agentLoop } from "./agent/loop.ts";
+import {
+  type AgentEventSink,
+  type AgentLoopResult,
+  agentLoop,
+} from "./agent/loop.ts";
 import { terminalAgentEventSink } from "./agent/terminal-event-sink.js";
 import { SubAgentRegistry } from "./agents/registry.js";
 import type { SpawnContext } from "./agents/spawn.js";
 import { FeishuChannel } from "./channels/feishu.js";
 import { ChannelGateway } from "./channels/gateway.js";
+import { resolveCliModePolicy } from "./cli/mode-policy.js";
+import type { CliExecutionResult } from "./cli/run.js";
 import { createAgentCommands } from "./commands/agent.js";
 import { createChannelCommands } from "./commands/channel.js";
 import { contextCommands } from "./commands/context.js";
@@ -44,6 +50,7 @@ import type { PluginDefinition } from "./plugins/types.js";
 import { createDashScopeEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
+import { createRuntimeShutdown } from "./runtime/shutdown.js";
 import { HookPipeline } from "./security/hooks.js";
 import type {
   ApprovalRequest,
@@ -226,7 +233,24 @@ async function importNewDocuments(): Promise<void> {
   );
 }
 
-export async function startAgent(): Promise<void> {
+export interface StartAgentOptions {
+  mode: "interactive" | "ask" | "plan";
+  prompt?: string;
+  output: "terminal" | "quiet";
+  continueSession: boolean;
+  approvalMode: "ask" | "never" | "always";
+}
+
+const DEFAULT_START_OPTIONS: StartAgentOptions = {
+  mode: "interactive",
+  output: "terminal",
+  continueSession: false,
+  approvalMode: "ask",
+};
+
+export async function startAgent(
+  options: StartAgentOptions = DEFAULT_START_OPTIONS,
+): Promise<CliExecutionResult | undefined> {
   await connectMCP();
 
   console.log("  加载插件...");
@@ -256,7 +280,7 @@ export async function startAgent(): Promise<void> {
   const tokenTracker = new TokenTracker(
     MODEL_CONFIG.effectiveContextWindowTokens,
   );
-  const isContinue = process.argv.includes("--continue");
+  const isContinue = options.continueSession;
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
@@ -267,10 +291,15 @@ export async function startAgent(): Promise<void> {
     .pipe("sessionContext", sessionContext());
   if (vectorStore) builder.pipe("ragContext", ragContext(vectorStore));
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl =
+    options.mode === "interactive" || options.approvalMode === "ask"
+      ? createInterface({ input: process.stdin, output: process.stdout })
+      : undefined;
   let approvalQueue = Promise.resolve();
 
   const requestApproval: RequestApproval = (request) => {
+    if (options.approvalMode === "always") return Promise.resolve(true);
+    if (options.approvalMode === "never") return Promise.resolve(false);
     const decision = approvalQueue.then(() => promptForApproval(request));
     approvalQueue = decision.then(
       () => undefined,
@@ -280,6 +309,7 @@ export async function startAgent(): Promise<void> {
   };
 
   function promptForApproval(request: ApprovalRequest): Promise<boolean> {
+    if (!rl) return Promise.resolve(false);
     const input = request.input as Record<string, unknown> | null;
     const target =
       request.tool === "bash"
@@ -352,10 +382,58 @@ export async function startAgent(): Promise<void> {
     ...createAgentCommands(agentRegistry),
   ]);
 
-  console.log("  启动 Channel...");
-  await gateway.startAll();
+  const runtimeController = new AbortController();
+  let resolveInteractive: (() => void) | undefined;
 
-  if (cronService) {
+  const handleInterrupt = () => {
+    process.exitCode = 130;
+    runtimeController.abort();
+    void shutdown.run();
+  };
+  const handleTermination = () => {
+    process.exitCode = 143;
+    runtimeController.abort();
+    void shutdown.run();
+  };
+
+  const shutdown = createRuntimeShutdown(
+    [
+      {
+        name: "signals",
+        close: () => {
+          process.off("SIGINT", handleInterrupt);
+          process.off("SIGTERM", handleTermination);
+        },
+      },
+      { name: "cron", close: () => cronService?.stop() },
+      { name: "channels", close: () => gateway.stopAll() },
+      { name: "plugins", close: () => pluginManager.unloadAll() },
+      { name: "mcp", close: () => registry.closeAllMCP() },
+      { name: "vector store", close: () => vectorStore?.close() },
+      { name: "input", close: () => rl?.close() },
+      { name: "interactive wait", close: () => resolveInteractive?.() },
+    ],
+    (task, error) => {
+      console.error(
+        `  [关闭失败: ${task}] ${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  );
+
+  process.once("SIGINT", handleInterrupt);
+  process.once("SIGTERM", handleTermination);
+
+  if (options.mode === "interactive") {
+    console.log("  启动 Channel...");
+    try {
+      await gateway.startAll();
+    } catch (error) {
+      await shutdown.run();
+      throw error;
+    }
+  }
+
+  if (cronService && options.mode === "interactive") {
     cronService.load();
     cronService.setExecutor({
       runAgentPrompt: async (prompt) => {
@@ -390,7 +468,9 @@ export async function startAgent(): Promise<void> {
     cronService.start();
   }
   const cronJobs = cronService?.list() ?? [];
-  console.log(`  Cron: ${cronJobs.length} 个任务已加载`);
+  if (options.mode === "interactive") {
+    console.log(`  Cron: ${cronJobs.length} 个任务已加载`);
+  }
 
   if (isContinue && store.exists()) {
     const loaded = store.load();
@@ -448,7 +528,9 @@ export async function startAgent(): Promise<void> {
     return true;
   }
 
-  async function executeUserTurn(userMsg: ModelMessage): Promise<void> {
+  async function executeUserTurn(
+    userMsg: ModelMessage,
+  ): Promise<CliExecutionResult> {
     messages.push(userMsg);
     tokenTracker.addMessage(userMsg);
     timestamps.set(messages.length - 1, Date.now());
@@ -462,18 +544,25 @@ export async function startAgent(): Promise<void> {
     replaceMessages(turnDefense.messages);
     await compactIfNeeded();
 
-    const currentSystem = builder.build(makePromptCtx());
+    const modePolicy = resolveCliModePolicy(
+      options.mode,
+      builder.build(makePromptCtx()),
+      options.approvalMode,
+    );
     const trace = await LocalTraceRecorder.start({
       sessionId: config.session.id,
       model: model.modelId || config.model.name,
     });
-    let newMessages: ModelMessage[];
+    let loopResult: AgentLoopResult;
+    const auditStart = registry.getExecutionAuditLog().length;
+    const eventSink: AgentEventSink | undefined =
+      options.output === "terminal" ? terminalAgentEventSink : undefined;
     try {
-      const result = await agentLoop({
+      loopResult = await agentLoop({
         model,
         registry,
         messages,
-        system: currentSystem,
+        system: modePolicy.system,
         tracker,
         onStepUsage: async (usage, responseMessages, needsFollowUp) => {
           const promptTokens = promptTokensFromUsage(usage);
@@ -486,32 +575,50 @@ export async function startAgent(): Promise<void> {
           }
           if (needsFollowUp) await compactIfNeeded();
         },
-        eventSink: terminalAgentEventSink,
+        ...(eventSink ? { eventSink } : {}),
         trace,
         requestApproval,
+        ...(modePolicy.toolSelection
+          ? { toolSelection: modePolicy.toolSelection }
+          : {}),
+        abortSignal: runtimeController.signal,
       });
-      newMessages = result.appendedMessages;
       await trace.finish("completed");
       console.log(`  [Trace] ${trace.filePath}`);
     } catch (error) {
       await trace.finish("failed", error);
-      console.error(
-        `  [Agent] ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
+      throw error;
     }
 
     const now = Date.now();
-    for (const message of newMessages) {
+    for (const message of loopResult.appendedMessages) {
       const index = messages.indexOf(message);
       if (index >= 0 && !timestamps.has(index)) timestamps.set(index, now);
     }
-    store.appendAll(newMessages);
+    store.appendAll(loopResult.appendedMessages);
 
     const status = tokenTracker.status;
     console.log(`  [Token] ~${status.tokens} tokens (${status.percent}%)`);
 
     await compactIfNeeded();
+
+    const policyDenied = registry
+      .getExecutionAuditLog()
+      .slice(auditStart)
+      .some(
+        (entry) => entry.outcome === "denied" || entry.outcome === "blocked",
+      );
+    return {
+      status: policyDenied
+        ? "permission_denied"
+        : loopResult.termination === "completed"
+          ? "completed"
+          : "incomplete",
+      answer: loopResult.text || "(无输出)",
+      termination: loopResult.termination,
+      stats: loopResult.stats,
+      tracePath: trace.filePath,
+    };
   }
 
   function runUserTurn(userMsg: ModelMessage): void {
@@ -521,26 +628,18 @@ export async function startAgent(): Promise<void> {
           `  [Turn] ${error instanceof Error ? error.message : String(error)}`,
         );
       })
-      .finally(ask);
+      .finally(() => {
+        if (!shutdown.started) ask();
+      });
   }
 
   function ask() {
+    if (!rl || shutdown.started) return;
     rl.question("\nYou: ", async (input) => {
       const trimmed = input.trim();
       if (trimmed === "/exit") {
         console.log("Bye!");
-        cronService?.stop();
-        await gateway.stopAll();
-        await pluginManager.unloadAll();
-        try {
-          await registry.closeAllMCP();
-        } catch (error) {
-          console.error(
-            `  [MCP] 关闭连接失败: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        vectorStore?.close();
-        rl.close();
+        await shutdown.run();
         return;
       }
       if (!trimmed) {
@@ -580,6 +679,18 @@ export async function startAgent(): Promise<void> {
       const userMsg: ModelMessage = { role: "user", content: trimmed };
       runUserTurn(userMsg);
     });
+  }
+
+  if (options.mode !== "interactive") {
+    if (!options.prompt) {
+      await shutdown.run();
+      throw new Error(`${options.mode} 模式缺少任务描述`);
+    }
+    try {
+      return await executeUserTurn({ role: "user", content: options.prompt });
+    } finally {
+      await shutdown.run();
+    }
   }
 
   console.log('Super Agent v0.19 — Sub-Agent 机制 (type "/exit" to quit)');
@@ -630,6 +741,18 @@ export async function startAgent(): Promise<void> {
   }
   console.log("");
 
-  await importNewDocuments();
-  ask();
+  try {
+    await importNewDocuments();
+  } catch (error) {
+    await shutdown.run();
+    throw error;
+  }
+  if (shutdown.started) {
+    await shutdown.run();
+    return undefined;
+  }
+  return new Promise<void>((resolve) => {
+    resolveInteractive = resolve;
+    ask();
+  }).then(() => undefined);
 }

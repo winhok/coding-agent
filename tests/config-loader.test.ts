@@ -126,4 +126,19 @@ describe("config", () => {
       /MCP server name may only contain/,
     );
   });
+
+  it("throws configuration errors instead of terminating the process", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coding-agent-config-"));
+    tempDirs.push(dir);
+    const malformedPath = path.join(dir, "malformed.json");
+    const invalidPath = path.join(dir, "invalid.json");
+    fs.writeFileSync(malformedPath, "{");
+    fs.writeFileSync(
+      invalidPath,
+      JSON.stringify({ agents: { maxConcurrent: 0 } }),
+    );
+
+    assert.throws(() => loadConfig(malformedPath), /解析 .* 失败/);
+    assert.throws(() => loadConfig(invalidPath), /配置文件校验失败/);
+  });
 });

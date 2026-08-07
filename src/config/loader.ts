@@ -38,18 +38,16 @@ export function loadConfig(path = CONFIG_FILE): SuperAgentConfig {
   try {
     raw = JSON.parse(fs.readFileSync(path, "utf-8"));
   } catch (error) {
-    console.error(`  ✗ 解析 ${path} 失败: ${(error as Error).message}`);
-    process.exit(1);
+    throw new Error(`解析 ${path} 失败: ${(error as Error).message}`);
   }
 
   const substituted = substituteEnvVars(raw);
   const result = SuperAgentConfigSchema.safeParse(substituted);
   if (!result.success) {
-    console.error("  ✗ 配置文件校验失败:");
-    for (const issue of result.error.issues) {
-      console.error(`    ${issue.path.join(".")}: ${issue.message}`);
-    }
-    process.exit(1);
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`配置文件校验失败: ${issues}`);
   }
 
   console.log(`  ✓ 已加载 ${path}`);
