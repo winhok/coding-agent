@@ -112,6 +112,50 @@ describe("tool-unit registry", () => {
     });
   });
 
+  it("provides an unlocked snapshot that excludes spawn_agent", async () => {
+    let releaseParent!: () => void;
+    let parentStarted!: () => void;
+    const parentStartedPromise = new Promise<void>((resolve) => {
+      parentStarted = resolve;
+    });
+    const releaseParentPromise = new Promise<void>((resolve) => {
+      releaseParent = resolve;
+    });
+
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: "spawn_agent",
+        description: "parent spawn",
+        parameters: { type: "object", properties: {} },
+        execute: async () => {
+          parentStarted();
+          await releaseParentPromise;
+          return "parent";
+        },
+      },
+      {
+        name: "child_read",
+        description: "child read",
+        parameters: { type: "object", properties: {} },
+        execute: async () => "child",
+      },
+    );
+
+    const locked = registry.toAISDKFormat();
+    const parent = locked.spawn_agent;
+    assert.ok(parent);
+    const parentPromise = parent.execute({});
+    await parentStartedPromise;
+
+    const unlocked = registry.toAISDKFormatUnlocked(new Set(["spawn_agent"]));
+    assert.equal(unlocked.spawn_agent, undefined);
+    assert.equal(await unlocked.child_read?.execute({}), "child");
+
+    releaseParent();
+    assert.equal(await parentPromise, "parent");
+  });
+
   it("registers MCP tools as deferred concurrency-safe reads", async () => {
     const registry = new ToolRegistry();
 

@@ -15,7 +15,6 @@
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:unit": "node --import tsx --test tests/tool-unit/*.test.ts",
     "eval": "node --import tsx --test evals/**/*.test.ts",
-    "eval:mock": "node --import tsx --test evals/one-turn-tools/*.test.ts evals/multi-turn-tools/*.test.ts",
     "eval:smoke": "RUN_REAL_MODEL_EVALS=1 node --import tsx --test evals/smoke-real-model/*.test.ts",
     "check": "biome check --write",
     "prepare": "pnpm clean && tsc -b tsconfig.build.json --force"

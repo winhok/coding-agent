@@ -4,8 +4,11 @@ import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
 import { agentLoop } from "./agent/loop.ts";
+import { SubAgentRegistry } from "./agents/registry.js";
+import type { SpawnContext } from "./agents/spawn.js";
 import { FeishuChannel } from "./channels/feishu.js";
 import { ChannelGateway } from "./channels/gateway.js";
+import { createAgentCommands } from "./commands/agent.js";
 import { createChannelCommands } from "./commands/channel.js";
 import { contextCommands } from "./commands/context.js";
 import { createCronCommands } from "./commands/cron.js";
@@ -48,6 +51,7 @@ import { createMemoryTool } from "./tools/memory-tools.js";
 import { createRagTools } from "./tools/rag-tools.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { createSkillTool } from "./tools/skill-tool.js";
+import { createSpawnTool } from "./tools/spawn-tools.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
 import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
 
@@ -120,6 +124,12 @@ registry.setHookPipeline(hookPipeline);
 // ── Cron Service ────────────────────────────────
 const cronService = new CronService(".");
 registry.register(createCronTool(cronService));
+
+// ── Sub-Agent ────────────────────────────────
+const agentRegistry = new SubAgentRegistry({
+  maxSpawnDepth: 1,
+  maxConcurrent: 3,
+});
 
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
@@ -215,6 +225,18 @@ async function main() {
     };
   }
 
+  function getSpawnContext(): SpawnContext {
+    return {
+      model,
+      registry,
+      agentRegistry,
+      buildSystem: () => builder.build(makePromptCtx()),
+      currentDepth: 0,
+    };
+  }
+
+  registry.register(createSpawnTool(agentRegistry, getSpawnContext));
+
   // ── Channel Gateway ───────────────────────
   const gateway = new ChannelGateway({
     model,
@@ -242,6 +264,7 @@ async function main() {
     ...createChannelCommands(gateway),
     ...createSecurityCommands(registry, hookPipeline),
     ...createCronCommands(cronService),
+    ...createAgentCommands(agentRegistry),
   ]);
 
   console.log("  启动 Channel...");
@@ -426,10 +449,11 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.18 — Cron 定时任务 (type "/exit" to quit)');
+  console.log('Super Agent v0.19 — Sub-Agent 机制 (type "/exit" to quit)');
   console.log("快捷命令：");
   console.log("  /cron            — 查看定时任务");
   console.log("  /cron logs       — 查看执行记录");
+  console.log("  /agents          — 查看子 Agent 运行记录");
   console.log("  /role [角色]     — 查看/切换角色 (owner|collaborator|guest)");
   console.log("  /hooks           — 查看 Hook 管线");
   console.log("  /channel         — 查看通道状态");

@@ -92,7 +92,9 @@ export async function agentLoop(
                   ? part.output
                   : JSON.stringify(part.output);
               const preview =
-                output.length > 120 ? `${output.slice(0, 120)}...` : output;
+                part.toolName === "spawn_agent" || output.length <= 120
+                  ? output
+                  : `${output.slice(0, 120)}...`;
               console.log(`  [结果: ${part.toolName}] ${preview}`);
               break;
             }

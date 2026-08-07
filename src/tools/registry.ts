@@ -232,9 +232,14 @@ export class ToolRegistry {
     for (const resolve of waiting) resolve();
   }
 
-  toAISDKFormat(): Record<string, any> {
+  private formatTools(
+    useLocks: boolean,
+    excludeTools?: Set<string>,
+  ): Record<string, any> {
     const result: Record<string, any> = {};
-    const activeTools = this.getActiveTools();
+    const activeTools = this.getActiveTools().filter(
+      (tool) => !excludeTools?.has(tool.name),
+    );
 
     for (const tool of activeTools) {
       const maxChars = tool.maxResultChars;
@@ -272,10 +277,12 @@ export class ToolRegistry {
             }
           }
 
-          if (isSafe) {
-            await this.acquireConcurrent();
-          } else {
-            await this.acquireExclusive();
+          if (useLocks) {
+            if (isSafe) {
+              await this.acquireConcurrent();
+            } else {
+              await this.acquireExclusive();
+            }
           }
           try {
             const raw = await executeFn(input);
@@ -297,16 +304,26 @@ export class ToolRegistry {
 
             return output;
           } finally {
-            if (isSafe) {
-              this.releaseConcurrent();
-            } else {
-              this.releaseExclusive();
+            if (useLocks) {
+              if (isSafe) {
+                this.releaseConcurrent();
+              } else {
+                this.releaseExclusive();
+              }
             }
           }
         },
       };
     }
     return result;
+  }
+
+  toAISDKFormatUnlocked(excludeTools?: Set<string>): Record<string, any> {
+    return this.formatTools(false, excludeTools);
+  }
+
+  toAISDKFormat(): Record<string, any> {
+    return this.formatTools(true);
   }
 }
 
