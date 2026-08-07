@@ -8,6 +8,7 @@ import { FeishuChannel } from "./channels/feishu.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createChannelCommands } from "./commands/channel.js";
 import { contextCommands } from "./commands/context.js";
+import { createCronCommands } from "./commands/cron.js";
 import { dreamCommands } from "./commands/dream.js";
 import { type CommandContext, createDispatcher } from "./commands/index.js";
 import { memoryCommands } from "./commands/memory.js";
@@ -30,6 +31,7 @@ import {
   toolGuide,
 } from "./context/prompt-builder.js";
 import { memoryContext, ragContext } from "./context/prompt-pipes.js";
+import { CronService } from "./cron/service.js";
 import { MemoryStore } from "./memory/store.js";
 import { PluginManager } from "./plugins/manager.js";
 import type { PluginDefinition } from "./plugins/types.js";
@@ -39,6 +41,7 @@ import { SqliteVectorStore } from "./rag/sqlite-store.js";
 import { HookPipeline } from "./security/hooks.js";
 import { remapMessageTimestamps, SessionStore } from "./session/store.js";
 import { SkillLoader } from "./skills/loader.js";
+import { createCronTool } from "./tools/cron-tools.js";
 import { allTools } from "./tools/index.ts";
 import { MCPClient } from "./tools/mcp-client.ts";
 import { createMemoryTool } from "./tools/memory-tools.js";
@@ -113,6 +116,10 @@ hookPipeline.registerPost("bash-timestamp", (toolName, _input, output) => {
 });
 
 registry.setHookPipeline(hookPipeline);
+
+// ── Cron Service ────────────────────────────────
+const cronService = new CronService(".");
+registry.register(createCronTool(cronService));
 
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
@@ -234,10 +241,38 @@ async function main() {
     ...createPluginCommands(pluginManager, availablePlugins),
     ...createChannelCommands(gateway),
     ...createSecurityCommands(registry, hookPipeline),
+    ...createCronCommands(cronService),
   ]);
 
   console.log("  启动 Channel...");
   await gateway.startAll();
+
+  cronService.load();
+  cronService.setExecutor({
+    runAgentPrompt: async (prompt) => {
+      const cronMessages: ModelMessage[] = [{ role: "user", content: prompt }];
+      const system = builder.build(makePromptCtx());
+      await agentLoop(model, registry, cronMessages, system);
+      const lastMessage = cronMessages[cronMessages.length - 1];
+      if (!lastMessage) return "(无输出)";
+      if (typeof lastMessage.content === "string") return lastMessage.content;
+      if (Array.isArray(lastMessage.content)) {
+        return (
+          lastMessage.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("") || "(无输出)"
+        );
+      }
+      return String(lastMessage.content);
+    },
+    notify: (message) => {
+      console.log(`\n${message}`);
+    },
+  });
+  cronService.start();
+  const cronJobs = cronService.list();
+  console.log(`  Cron: ${cronJobs.length} 个任务已加载`);
 
   if (isContinue && store.exists()) {
     const loaded = store.load();
@@ -300,6 +335,7 @@ async function main() {
       const trimmed = input.trim();
       if (trimmed === "/exit") {
         console.log("Bye!");
+        cronService.stop();
         await gateway.stopAll();
         await pluginManager.unloadAll();
         await registry.closeAllMCP();
@@ -390,8 +426,10 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.17 — Permissions & Hooks (type "/exit" to quit)');
+  console.log('Super Agent v0.18 — Cron 定时任务 (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /cron            — 查看定时任务");
+  console.log("  /cron logs       — 查看执行记录");
   console.log("  /role [角色]     — 查看/切换角色 (owner|collaborator|guest)");
   console.log("  /hooks           — 查看 Hook 管线");
   console.log("  /channel         — 查看通道状态");
@@ -419,6 +457,7 @@ async function main() {
   console.log(
     `  Hook: ${hooks.pre.length} 个 pre + ${hooks.post.length} 个 post`,
   );
+  console.log(`  Cron: ${cronJobs.length} 个定时任务`);
   const pluginList = pluginManager.list();
   if (pluginList.length > 0) {
     console.log(`  已加载 ${pluginList.length} 个插件：`);
