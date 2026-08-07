@@ -8,6 +8,7 @@ import { contextCommands } from "./commands/context.js";
 import { dreamCommands } from "./commands/dream.js";
 import { type CommandContext, createDispatcher } from "./commands/index.js";
 import { memoryCommands } from "./commands/memory.js";
+import { createPluginCommands } from "./commands/plugin.js";
 import { ragCommands } from "./commands/rag.js";
 import { createSkillCommands } from "./commands/skill.js";
 import {
@@ -26,6 +27,8 @@ import {
 } from "./context/prompt-builder.js";
 import { memoryContext, ragContext } from "./context/prompt-pipes.js";
 import { MemoryStore } from "./memory/store.js";
+import { PluginManager } from "./plugins/manager.js";
+import type { PluginDefinition } from "./plugins/types.js";
 import { createDashScopeEmbedder, createMockEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
@@ -81,6 +84,10 @@ const skillLoader = new SkillLoader(".");
 const loadedSkills = skillLoader.load();
 registry.register(createSkillTool(skillLoader));
 
+// ── Plugins ────────────────────────────────
+const pluginManager = new PluginManager(registry);
+const availablePlugins = new Map<string, PluginDefinition>();
+
 const GITHUB_MCP_REMOTE_URL = "https://api.githubcopilot.com/mcp/";
 
 export async function connectMCP(targetRegistry = registry) {
@@ -115,6 +122,7 @@ const dispatch = createDispatcher([
   ...ragCommands,
   ...dreamCommands,
   ...createSkillCommands(skillLoader),
+  ...createPluginCommands(pluginManager, availablePlugins),
 ]);
 
 async function importNewDocuments(): Promise<void> {
@@ -142,6 +150,16 @@ async function importNewDocuments(): Promise<void> {
 
 async function main() {
   await connectMCP();
+
+  console.log("  加载插件...");
+  for (const [name, definition] of availablePlugins) {
+    try {
+      const tools = await pluginManager.load(definition);
+      console.log(`  ✓ ${name} — ${tools.length} 个工具`);
+    } catch {
+      console.log(`  ✗ ${name} — 加载失败`);
+    }
+  }
 
   const store = new SessionStore("default");
   let messages: ModelMessage[] = [];
@@ -234,6 +252,7 @@ async function main() {
       const trimmed = input.trim();
       if (trimmed === "/exit") {
         console.log("Bye!");
+        await pluginManager.unloadAll();
         await registry.closeAllMCP();
         vectorStore.close();
         rl.close();
@@ -322,8 +341,11 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.14 — Skills (type "/exit" to quit)');
+  console.log('Super Agent v0.15 — Plugins (type "/exit" to quit)');
   console.log("快捷命令：");
+  console.log("  /plugin          — 查看插件状态");
+  console.log("  /plugin load X   — 加载插件");
+  console.log("  /plugin unload X — 卸载插件");
   console.log("  /skill          — 查看可用的 skills");
   console.log("  /code-review    — 直接加载并执行 code-review skill");
   console.log("  /ingest <path>  — 导入文档到知识库");
@@ -338,6 +360,13 @@ async function main() {
   console.log("  /exit           — 退出");
   console.log("");
   console.log(`  已加载 ${memoryStore.list().length} 条历史记忆`);
+  const pluginList = pluginManager.list();
+  if (pluginList.length > 0) {
+    console.log(`  已加载 ${pluginList.length} 个插件：`);
+    for (const plugin of pluginList) {
+      console.log(`    ${plugin.name} — ${plugin.tools.join(", ")}`);
+    }
+  }
   if (loadedSkills.length > 0) {
     console.log(`  发现 ${loadedSkills.length} 个 skill：`);
     for (const skill of loadedSkills) {

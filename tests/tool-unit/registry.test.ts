@@ -182,6 +182,30 @@ describe("tool-unit registry", () => {
     assert.equal(after.total, before.total);
   });
 
+  it("unregisters tools and clears their discovered state", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "plugin__query",
+      description: "Plugin query",
+      parameters: { type: "object", properties: {} },
+      shouldDefer: true,
+      execute: async () => "ok",
+    });
+    registry.searchTools("plugin__query");
+
+    assert.equal(registry.unregister("plugin__query"), true);
+    assert.equal(registry.get("plugin__query"), undefined);
+
+    registry.register({
+      name: "plugin__query",
+      description: "Plugin query",
+      parameters: { type: "object", properties: {} },
+      shouldDefer: true,
+      execute: async () => "ok",
+    });
+    assert.deepEqual(registry.getActiveTools(), []);
+  });
+
   it("tracks a connected MCP client for cleanup when tool discovery fails", async () => {
     const registry = new ToolRegistry();
     let closed = false;
