@@ -1,5 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
 
 const execAsync = promisify(exec);
@@ -28,7 +29,10 @@ export const bashTool: ToolDefinition = {
   isReadOnly: false,
   capabilities: ["execute"],
   maxResultChars: MAX_OUTPUT_LENGTH,
-  execute: async (input: { command?: unknown; timeout?: unknown }) => {
+  execute: async (
+    input: { command?: unknown; timeout?: unknown },
+    context?: ToolExecutionContext,
+  ) => {
     const command = input.command;
     if (typeof command !== "string" || !command.trim()) {
       return "错误：命令不能为空。";
@@ -37,13 +41,18 @@ export const bashTool: ToolDefinition = {
     const timeout = normalizeTimeout(input.timeout);
 
     try {
-      await execAsync("echo test", { timeout: 1_000, maxBuffer: 1024 * 1024 });
+      await execAsync("echo test", {
+        cwd: context?.workingDir ?? process.cwd(),
+        timeout: 1_000,
+        maxBuffer: 1024 * 1024,
+      });
     } catch {
       return `[bash 不可用] 当前环境（WebContainer）不支持 shell 命令。本地终端运行 pnpm start 可使用 bash 工具。`;
     }
 
     try {
       const { stdout, stderr } = await execAsync(command, {
+        cwd: context?.workingDir ?? process.cwd(),
         timeout,
         maxBuffer: 1024 * 1024,
       });

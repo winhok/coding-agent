@@ -21,6 +21,7 @@ import type {
 } from "./events.js";
 import { ToolLoopDetector } from "./loop-detection.js";
 import { calculateDelay, isRetryable, sleep } from "./retry.js";
+import { createAgentRunContext } from "./run-context.js";
 
 const MAX_STEPS = 50;
 const MAX_RETRIES = 3;
@@ -30,6 +31,7 @@ export interface AgentLoopOptions {
   registry: ToolRegistry;
   messages: ModelMessage[];
   system: string;
+  workingDir: string;
   tracker?: UsageTracker;
   onStepUsage?: (
     usage: StepUsage,
@@ -58,6 +60,7 @@ export async function agentLoop({
   registry,
   messages,
   system,
+  workingDir,
   tracker,
   onStepUsage,
   trace,
@@ -77,6 +80,10 @@ export async function agentLoop({
   const totalUsage = { ...EMPTY_USAGE };
   const appendedMessages: ModelMessage[] = [];
   const loopDetector = new ToolLoopDetector();
+  const runContext = createAgentRunContext(workingDir);
+  const toolExecutionContext = requestApproval
+    ? { ...runContext, requestApproval }
+    : runContext;
 
   const emit = async (event: Parameters<AgentEventSink>[0]) => {
     await eventSink?.(event);
@@ -112,10 +119,7 @@ export async function agentLoop({
           const result = streamText({
             model,
             system,
-            tools: registry.toAISDKFormat(
-              requestApproval ? { requestApproval } : undefined,
-              toolSelection,
-            ),
+            tools: registry.toAISDKFormat(toolExecutionContext, toolSelection),
             toolChoice: isLastStep ? "none" : "auto",
             messages,
             maxRetries: 0,

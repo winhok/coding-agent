@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { createAgentRunContext } from "../../src/agent/run-context.ts";
 import { bashTool } from "../../src/tools/bash.tool.ts";
 import { createTodosTool } from "../../src/tools/create_todos.tool.ts";
 import { editFileTool } from "../../src/tools/edit_file.tool.ts";
@@ -13,7 +14,6 @@ import { grepTool } from "../../src/tools/grep.tool.ts";
 import { allTools } from "../../src/tools/index.ts";
 import { listDirectoryTool } from "../../src/tools/list_directory.tool.ts";
 import { readFileTool } from "../../src/tools/read_file.tool.ts";
-import { resetTodoManagerForTests } from "../../src/tools/todo_manager.ts";
 import { updateTodoTool } from "../../src/tools/update_todo.tool.ts";
 import { writeFileTool } from "../../src/tools/write_file.tool.ts";
 import { cleanupTempDir, makeTempDir } from "../helpers.ts";
@@ -42,12 +42,13 @@ describe("tool-unit tools", () => {
   });
 
   it("creates and replaces an in-memory todo plan", async () => {
-    resetTodoManagerForTests();
+    const context = createAgentRunContext(process.cwd());
 
     const createResult = String(
-      await createTodosTool.execute({
-        todos: ["Read current tools", "Add planning tools"],
-      }),
+      await createTodosTool.execute(
+        { todos: ["Read current tools", "Add planning tools"] },
+        context,
+      ),
     );
 
     assert.match(createResult, /已创建 2 个计划步骤/);
@@ -55,7 +56,7 @@ describe("tool-unit tools", () => {
     assert.match(createResult, /\[pending\] #2 Add planning tools/);
 
     const replaceResult = String(
-      await createTodosTool.execute({ todos: ["Verify tests"] }),
+      await createTodosTool.execute({ todos: ["Verify tests"] }, context),
     );
 
     assert.match(replaceResult, /已创建 1 个计划步骤/);
@@ -64,31 +65,32 @@ describe("tool-unit tools", () => {
   });
 
   it("updates todo status and rejects invalid updates", async () => {
-    resetTodoManagerForTests();
-    await createTodosTool.execute({
-      todos: ["Write tests", "Implement tools"],
-    });
+    const context = createAgentRunContext(process.cwd());
+    await createTodosTool.execute(
+      { todos: ["Write tests", "Implement tools"] },
+      context,
+    );
 
     const runningResult = String(
-      await updateTodoTool.execute({ id: "1", status: "running" }),
+      await updateTodoTool.execute({ id: "1", status: "running" }, context),
     );
     assert.match(runningResult, /步骤 #1 "Write tests" -> running/);
     assert.match(runningResult, /\[running\] #1 Write tests/);
     assert.match(runningResult, /\[pending\] #2 Implement tools/);
 
     const completedResult = String(
-      await updateTodoTool.execute({ id: "1", status: "completed" }),
+      await updateTodoTool.execute({ id: "1", status: "completed" }, context),
     );
     assert.match(completedResult, /步骤 #1 "Write tests" -> completed/);
     assert.match(completedResult, /\[completed\] #1 Write tests/);
 
     const invalidStatusResult = String(
-      await updateTodoTool.execute({ id: "1", status: "blocked" }),
+      await updateTodoTool.execute({ id: "1", status: "blocked" }, context),
     );
     assert.match(invalidStatusResult, /错误：无效状态 "blocked"/);
 
     const missingResult = String(
-      await updateTodoTool.execute({ id: "99", status: "completed" }),
+      await updateTodoTool.execute({ id: "99", status: "completed" }, context),
     );
     assert.match(missingResult, /错误：未找到 ID 为 "99" 的步骤/);
   });
@@ -113,7 +115,12 @@ describe("tool-unit tools", () => {
       assert.match(String(readResult), /显示第 1-1 行/);
       assert.match(String(readResult), /1: hello eval/);
 
-      const listResult = String(await listDirectoryTool.execute({ path: dir }));
+      const listResult = String(
+        await listDirectoryTool.execute(
+          { path: "." },
+          createAgentRunContext(dir),
+        ),
+      );
       assert.match(listResult, /note\.txt/);
       assert.match(listResult, /nested/);
     } finally {
@@ -337,13 +344,19 @@ describe("tool-unit tools", () => {
       );
 
       const globResult = String(
-        await globTool.execute({ pattern: "**/*.ts", path: dir }),
+        await globTool.execute(
+          { pattern: "**/*.ts", path: "." },
+          createAgentRunContext(dir),
+        ),
       );
       assert.match(globResult, /src\/main\.ts/);
       assert.doesNotMatch(globResult, /node_modules/);
 
       const grepResult = String(
-        await grepTool.execute({ pattern: "marker", path: dir }),
+        await grepTool.execute(
+          { pattern: "marker", path: "." },
+          createAgentRunContext(dir),
+        ),
       );
       assert.match(grepResult, /src\/main\.ts:1/);
       assert.doesNotMatch(grepResult, /src\/case\.ts/);
@@ -370,7 +383,10 @@ describe("tool-unit tools", () => {
       );
 
       const grepResult = String(
-        await grepTool.execute({ pattern: "needle", path: dir, maxResults: 2 }),
+        await grepTool.execute(
+          { pattern: "needle", path: ".", maxResults: 2 },
+          createAgentRunContext(dir),
+        ),
       );
 
       const lines = grepResult.split("\n");
@@ -390,11 +406,10 @@ describe("tool-unit tools", () => {
       writeFileSync(join(dir, "src", "three.ts"), "", "utf-8");
 
       const globResult = String(
-        await globTool.execute({
-          pattern: "src/*.ts",
-          path: dir,
-          maxResults: 2,
-        }),
+        await globTool.execute(
+          { pattern: "src/*.ts", path: ".", maxResults: 2 },
+          createAgentRunContext(dir),
+        ),
       );
 
       const lines = globResult.split("\n");

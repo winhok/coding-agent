@@ -54,14 +54,8 @@ export class TodoManager {
   }
 }
 
-export const todoManager = new TodoManager();
-
 export function isTodoStatus(value: unknown): value is TodoStatus {
   return (
     typeof value === "string" && TODO_STATUSES.includes(value as TodoStatus)
   );
-}
-
-export function resetTodoManagerForTests(): void {
-  todoManager.reset();
 }

@@ -8,13 +8,16 @@ import { withMutedConsole } from "../helpers.ts";
 
 describe("security roles", () => {
   it("applies owner, collaborator, and guest tool access", () => {
-    assert.equal(canUseTool("owner", "bash"), true);
-    assert.equal(canUseTool("collaborator", "bash"), false);
-    assert.equal(canUseTool("collaborator", "write_file"), true);
-    assert.equal(canUseTool("guest", "read_file"), true);
-    assert.equal(canUseTool("guest", "write_file"), false);
+    const bash = { name: "bash", capabilities: ["execute"] as const };
+    const write = { name: "write_file", isReadOnly: false };
+    const read = { name: "read_file", isReadOnly: true };
+    assert.equal(canUseTool("owner", bash), true);
+    assert.equal(canUseTool("collaborator", bash), false);
+    assert.equal(canUseTool("collaborator", write), true);
+    assert.equal(canUseTool("guest", read), true);
+    assert.equal(canUseTool("guest", write), false);
     assert.deepEqual(
-      filterToolsForRole(["read_file", "write_file", "bash"], "guest"),
+      filterToolsForRole([read, write, bash], "guest").map((tool) => tool.name),
       ["read_file"],
     );
   });
@@ -26,12 +29,14 @@ describe("security roles", () => {
         name: "read_file",
         description: "read",
         parameters: { type: "object", properties: {} },
+        isReadOnly: true,
         execute: async () => "read",
       },
       {
         name: "bash",
         description: "bash",
         parameters: { type: "object", properties: {} },
+        capabilities: ["execute"],
         execute: async () => "bash",
       },
     );
@@ -45,6 +50,48 @@ describe("security roles", () => {
     registry.setRole("collaborator");
     assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
 
+    registry.setRole("guest");
+    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
+  });
+
+  it("applies configured capability policies and tool exceptions", () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: "read_file",
+        description: "read",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: true,
+        execute: async () => "read",
+      },
+      {
+        name: "write_file",
+        description: "write",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: false,
+        execute: async () => "write",
+      },
+    );
+    registry.setRolePolicies({
+      owner: {
+        capabilities: [
+          "read",
+          "write",
+          "execute",
+          "delegate",
+          "external",
+          "state",
+        ],
+      },
+      collaborator: {
+        capabilities: ["read", "write"],
+        deniedTools: ["write_file"],
+      },
+      guest: { capabilities: ["read"], allowedTools: ["read_file"] },
+    });
+
+    registry.setRole("collaborator");
+    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
     registry.setRole("guest");
     assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
   });
@@ -104,6 +151,7 @@ describe("bash classifier", () => {
       name: "bash",
       description: "bash",
       parameters: { type: "object", properties: {} },
+      capabilities: ["execute"],
       execute: async () => {
         executed = true;
         return "executed";
@@ -245,6 +293,7 @@ describe("bash classifier", () => {
       description: "plan",
       parameters: { type: "object", properties: {} },
       isReadOnly: false,
+      capabilities: ["state"],
       execute: async () => "planned",
     });
     const tool = registry.toAISDKFormat().create_todos;

@@ -11,6 +11,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { UsageTracker } from "../usage/tracker.js";
 
 export interface CommandContext {
+  workingDir: string;
   messages: ModelMessage[];
   timestamps: Map<number, number>;
   registry: ToolRegistry;

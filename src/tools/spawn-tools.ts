@@ -51,8 +51,10 @@ export function createSpawnTool(
       },
       executionContext?: ToolExecutionContext,
     ) => {
-      const context = {
-        ...getSpawnContext(),
+      const baseContext = getSpawnContext();
+      const context: SpawnContext = {
+        ...baseContext,
+        workingDir: executionContext?.workingDir ?? baseContext.workingDir,
         ...(executionContext?.requestApproval
           ? { requestApproval: executionContext.requestApproval }
           : {}),

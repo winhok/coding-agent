@@ -17,6 +17,8 @@ export interface SpawnContext {
   tracker?: UsageTracker;
   requestApproval?: RequestApproval;
   traceDirectory?: string;
+  workingDir: string;
+  projectRules?: string;
 }
 
 const MAX_STEPS = 30;
@@ -40,6 +42,8 @@ function buildSubAgentSystem(
   profile: SubAgentProfile,
   registry: ToolRegistry,
   selection: Parameters<ToolRegistry["getActiveTools"]>[0],
+  workingDir: string,
+  projectRules?: string,
 ): string {
   const activeTools = registry
     .getActiveTools(selection)
@@ -50,7 +54,8 @@ function buildSubAgentSystem(
     `你是独立执行单个任务的子 Agent，Profile 为 ${profileName}。`,
     profile.systemPrompt,
     "只处理收到的任务；不要假设主 Agent 的对话历史。需要多个独立信息时可并行调用工具。",
-    `当前工作目录：${process.cwd()}`,
+    `当前工作目录：${workingDir}`,
+    projectRules,
     `当前可见工具：${activeTools || "无"}`,
     deferred,
   ]
@@ -137,7 +142,10 @@ export async function spawnAgent(
         resolved.profile,
         ctx.registry,
         resolved.selection,
+        ctx.workingDir,
+        ctx.projectRules,
       ),
+      workingDir: ctx.workingDir,
       ...(ctx.tracker ? { tracker: ctx.tracker } : {}),
       eventSink,
       ...(trace ? { trace } : {}),

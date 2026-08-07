@@ -1,6 +1,10 @@
-import { resolve } from "node:path";
 import fg from "fast-glob";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
+import {
+  assertWorkspaceGlobPattern,
+  resolveWorkspacePath,
+} from "./workspace.js";
 
 const DEFAULT_MAX_RESULTS = 50;
 const MAX_RESULTS_LIMIT = 200;
@@ -28,20 +32,25 @@ export const globTool: ToolDefinition = {
   },
   isConcurrencySafe: true,
   isReadOnly: true,
-  execute: async ({
-    pattern,
-    path = ".",
-    maxResults = DEFAULT_MAX_RESULTS,
-  }: {
-    pattern: string;
-    path?: string;
-    maxResults?: number;
-  }) => {
+  execute: async (
+    {
+      pattern,
+      path = ".",
+      maxResults = DEFAULT_MAX_RESULTS,
+    }: { pattern: string; path?: string; maxResults?: number },
+    context?: ToolExecutionContext,
+  ) => {
     const limit = normalizeMaxResults(maxResults);
 
     try {
+      assertWorkspaceGlobPattern(pattern);
+      const directory = await resolveWorkspacePath(
+        context?.workingDir ?? process.cwd(),
+        path,
+        { mustExist: true },
+      );
       const results = await fg(pattern, {
-        cwd: resolve(path),
+        cwd: directory.absolutePath,
         ignore: ["node_modules/**", ".git/**"],
         dot: false,
         onlyFiles: true,

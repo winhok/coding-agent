@@ -23,8 +23,45 @@ describe("config", () => {
     assert.deepEqual(config.agents.profiles.explorer?.capabilities, ["read"]);
     assert.equal(config.channels.feishu.enabled, false);
     assert.equal(config.security.defaultRole, "owner");
+    assert.deepEqual(config.security.roles.guest.capabilities, [
+      "read",
+      "state",
+    ]);
     assert.equal(config.rag.enabled, true);
     assert.deepEqual(config.mcp.servers, []);
+  });
+
+  it("accepts capability-driven role policies with optional tool exceptions", () => {
+    const config = SuperAgentConfigSchema.parse({
+      security: {
+        roles: {
+          collaborator: {
+            capabilities: ["read", "write"],
+            deniedTools: ["write_file"],
+          },
+        },
+      },
+    });
+
+    assert.deepEqual(config.security.roles.collaborator.capabilities, [
+      "read",
+      "write",
+    ]);
+    assert.deepEqual(config.security.roles.collaborator.deniedTools, [
+      "write_file",
+    ]);
+    assert.deepEqual(config.security.roles.owner.capabilities, [
+      "read",
+      "write",
+      "execute",
+      "delegate",
+      "external",
+      "state",
+    ]);
+    assert.deepEqual(config.security.roles.guest.capabilities, [
+      "read",
+      "state",
+    ]);
   });
 
   it("merges configured sub-agent profiles with built-in defaults", () => {

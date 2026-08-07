@@ -12,6 +12,7 @@ interface GatewayOptions {
   model: LanguageModel;
   registry: ToolRegistry;
   buildSystem: () => string;
+  workingDir: string;
 }
 
 export class ChannelGateway {
@@ -71,6 +72,7 @@ export class ChannelGateway {
       registry: this.options.registry,
       messages,
       system,
+      workingDir: this.options.workingDir,
       eventSink: terminalAgentEventSink,
     });
 

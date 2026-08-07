@@ -1,10 +1,12 @@
 import Ajv, { type ValidateFunction } from "ajv";
+import type { AgentRunContext } from "../agent/run-context.js";
 import type { HookPipeline } from "../security/hooks.js";
 import {
   decideToolPermission,
   type PermissionLevel,
   type RequestApproval,
 } from "../security/permissions.js";
+import type { ToolCapability } from "./capabilities.js";
 
 export const DEFAULT_MAX_RESULT_CHARS = 3000;
 const MAX_AUDIT_ENTRIES = 1000;
@@ -24,22 +26,18 @@ export interface ExecutableTool {
   execute: (input: any, context?: ToolExecutionContext) => Promise<unknown>;
 }
 
-export type ToolCapability =
-  | "read"
-  | "write"
-  | "execute"
-  | "delegate"
-  | "external";
-
-export interface ToolExecutionContext {
+export interface ToolExecutionContext extends AgentRunContext {
   requestApproval?: RequestApproval;
 }
+
+export type { ToolCapability } from "./capabilities.js";
 
 interface ExecuteOptions {
   useLocks: boolean;
   hookPipeline: HookPipeline | undefined;
   authorize: (toolName: string, input: unknown) => boolean;
   requestApproval: RequestApproval | undefined;
+  executionContext: ToolExecutionContext;
 }
 
 export type ToolExecutionOutcome =
@@ -81,7 +79,13 @@ export class ToolExecutionPipeline {
     tool: ExecutableTool,
     // biome-ignore lint/suspicious/noExplicitAny: the AI SDK validates each tool's schema before execution
     input: any,
-    { useLocks, hookPipeline, authorize, requestApproval }: ExecuteOptions,
+    {
+      useLocks,
+      hookPipeline,
+      authorize,
+      requestApproval,
+      executionContext,
+    }: ExecuteOptions,
   ): Promise<string> {
     const startedAt = Date.now();
 
@@ -177,10 +181,7 @@ export class ToolExecutionPipeline {
     }
 
     try {
-      const raw = await tool.execute(
-        input,
-        requestApproval ? { requestApproval } : undefined,
-      );
+      const raw = await tool.execute(input, executionContext);
       const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
       let output = truncateResult(text, tool.maxResultChars);
 

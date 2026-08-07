@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_ROLE_POLICIES } from "../security/roles.js";
 
 export const ModelConfigSchema = z.object({
   provider: z.enum(["dashscope", "openai", "custom"]).default("dashscope"),
@@ -80,6 +81,7 @@ export const ToolCapabilitySchema = z.enum([
   "execute",
   "delegate",
   "external",
+  "state",
 ]);
 
 export const AgentProfileConfigSchema = z.object({
@@ -95,7 +97,7 @@ export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfileConfig> = {
   general: {
     description: "通用单任务执行者",
     systemPrompt: "自主完成指定任务，并返回简洁、可验证的结果。",
-    capabilities: ["read", "write", "execute", "delegate", "external"],
+    capabilities: ["read", "write", "execute", "delegate", "external", "state"],
   },
   explorer: {
     description: "只读代码与资料探索者",
@@ -126,11 +128,36 @@ export const AgentConfigSchema = z
     profiles: { ...DEFAULT_AGENT_PROFILES, ...value.profiles },
   }));
 
-export const SecurityConfigSchema = z.object({
-  defaultRole: z.enum(["owner", "collaborator", "guest"]).default("owner"),
-  auditLog: z.boolean().default(true),
-  bashTimestamp: z.boolean().default(true),
-});
+export const SecurityConfigSchema = z
+  .object({
+    defaultRole: z.enum(["owner", "collaborator", "guest"]).default("owner"),
+    roles: z
+      .object({
+        owner: rolePolicySchema().optional(),
+        collaborator: rolePolicySchema().optional(),
+        guest: rolePolicySchema().optional(),
+      })
+      .default({}),
+    auditLog: z.boolean().default(true),
+    bashTimestamp: z.boolean().default(true),
+  })
+  .transform((value) => ({
+    ...value,
+    roles: {
+      owner: value.roles.owner ?? DEFAULT_ROLE_POLICIES.owner,
+      collaborator:
+        value.roles.collaborator ?? DEFAULT_ROLE_POLICIES.collaborator,
+      guest: value.roles.guest ?? DEFAULT_ROLE_POLICIES.guest,
+    },
+  }));
+
+function rolePolicySchema() {
+  return z.object({
+    capabilities: z.array(ToolCapabilitySchema).min(1),
+    allowedTools: z.array(z.string().min(1)).optional(),
+    deniedTools: z.array(z.string().min(1)).optional(),
+  });
+}
 
 export const MemoryConfigSchema = z.object({
   dataDir: z.string().default("."),

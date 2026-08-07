@@ -1,6 +1,13 @@
 import { jsonSchema } from "ai";
+import { createAgentRunContext } from "../agent/run-context.js";
 import type { HookPipeline } from "../security/hooks.js";
-import { canUseTool, type Role } from "../security/roles.js";
+import {
+  canUseTool,
+  DEFAULT_ROLE_POLICIES,
+  type Role,
+  type RolePolicies,
+} from "../security/roles.js";
+import { inferToolCapabilities } from "./capabilities.js";
 import {
   DEFAULT_MAX_RESULT_CHARS,
   type ExecutableTool,
@@ -29,6 +36,12 @@ export interface ToolSelection {
   readOnlyOnly?: boolean;
 }
 
+export interface ToolExecutionOptions {
+  workingDir?: string;
+  todoManager?: ToolExecutionContext["todoManager"];
+  requestApproval?: ToolExecutionContext["requestApproval"];
+}
+
 interface MCPTool {
   name: string;
   description: string;
@@ -49,6 +62,7 @@ export class ToolRegistry {
 
   private discoveredTools = new Set<string>();
   private currentRole: Role = "owner";
+  private rolePolicies: RolePolicies = DEFAULT_ROLE_POLICIES;
   private hookPipeline?: HookPipeline;
 
   register(...tools: ToolDefinition[]): void {
@@ -135,6 +149,10 @@ export class ToolRegistry {
     return this.currentRole;
   }
 
+  setRolePolicies(policies: RolePolicies): void {
+    this.rolePolicies = policies;
+  }
+
   setHookPipeline(pipeline: HookPipeline): void {
     this.hookPipeline = pipeline;
   }
@@ -156,7 +174,7 @@ export class ToolRegistry {
       if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
         return false;
       }
-      if (!canUseTool(this.currentRole, tool.name)) {
+      if (!canUseTool(this.currentRole, tool, this.rolePolicies)) {
         return false;
       }
       return this.matchesSelection(tool, selection);
@@ -168,7 +186,7 @@ export class ToolRegistry {
       return (
         tool.shouldDefer &&
         !this.discoveredTools.has(tool.name) &&
-        canUseTool(this.currentRole, tool.name) &&
+        canUseTool(this.currentRole, tool, this.rolePolicies) &&
         this.matchesSelection(tool, selection)
       );
     });
@@ -200,7 +218,7 @@ export class ToolRegistry {
       if (
         tool &&
         tool.name !== "tool_search" &&
-        canUseTool(this.currentRole, tool.name)
+        canUseTool(this.currentRole, tool, this.rolePolicies)
       ) {
         results.push(tool);
         this.discoveredTools.add(tool.name);
@@ -215,7 +233,7 @@ export class ToolRegistry {
     let deferred = 0;
 
     for (const tool of this.tools.values()) {
-      if (!canUseTool(this.currentRole, tool.name)) continue;
+      if (!canUseTool(this.currentRole, tool, this.rolePolicies)) continue;
 
       const schemaSize = JSON.stringify({
         name: tool.name,
@@ -235,11 +253,12 @@ export class ToolRegistry {
   }
 
   private formatTools(
-    executionContext?: ToolExecutionContext,
+    executionOptions?: ToolExecutionOptions,
     selection?: ToolSelection,
   ): Record<string, any> {
     const result: Record<string, any> = {};
     const activeTools = this.getActiveTools(selection);
+    const executionContext = normalizeExecutionContext(executionOptions);
 
     for (const tool of activeTools) {
       const hookPipeline = this.hookPipeline;
@@ -255,11 +274,12 @@ export class ToolRegistry {
               const currentTool = this.tools.get(toolName);
               return (
                 currentTool !== undefined &&
-                canUseTool(this.currentRole, toolName) &&
+                canUseTool(this.currentRole, currentTool, this.rolePolicies) &&
                 this.matchesSelection(currentTool, selection)
               );
             },
             requestApproval: executionContext?.requestApproval,
+            executionContext,
           }),
       };
     }
@@ -267,7 +287,7 @@ export class ToolRegistry {
   }
 
   toAISDKFormat(
-    executionContext?: ToolExecutionContext,
+    executionContext?: ToolExecutionOptions,
     selection?: ToolSelection,
   ): Record<string, any> {
     return this.formatTools(executionContext, selection);
@@ -305,12 +325,20 @@ export class ToolRegistry {
 }
 
 export function toolCapabilities(tool: ToolDefinition): ToolCapability[] {
-  if (tool.capabilities && tool.capabilities.length > 0) {
-    return tool.capabilities;
-  }
-  if (tool.isReadOnly === true) return ["read"];
-  if (tool.isReadOnly === false) return ["write"];
-  return ["external"];
+  return inferToolCapabilities(tool);
 }
 
 export { truncateResult };
+
+function normalizeExecutionContext(
+  options?: ToolExecutionOptions,
+): ToolExecutionContext {
+  const fallback = createAgentRunContext(options?.workingDir ?? process.cwd());
+  return {
+    workingDir: fallback.workingDir,
+    todoManager: options?.todoManager ?? fallback.todoManager,
+    ...(options?.requestApproval
+      ? { requestApproval: options.requestApproval }
+      : {}),
+  };
+}

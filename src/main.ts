@@ -35,6 +35,10 @@ import {
 } from "./context/compressor.js";
 import { applyDefense, TokenTracker } from "./context/defense.js";
 import {
+  formatProjectRules,
+  loadProjectRules,
+} from "./context/project-rules.js";
+import {
   coreRules,
   deferredTools,
   PromptBuilder,
@@ -155,6 +159,7 @@ if (config.security.bashTimestamp) {
 }
 
 registry.setHookPipeline(hookPipeline);
+registry.setRolePolicies(config.security.roles);
 registry.setRole(config.security.defaultRole);
 
 // ── Cron Service ────────────────────────────────
@@ -251,6 +256,8 @@ const DEFAULT_START_OPTIONS: StartAgentOptions = {
 export async function startAgent(
   options: StartAgentOptions = DEFAULT_START_OPTIONS,
 ): Promise<CliExecutionResult | undefined> {
+  const workingDir = process.cwd();
+  const projectRules = formatProjectRules(await loadProjectRules(workingDir));
   await connectMCP();
 
   console.log("  加载插件...");
@@ -284,6 +291,7 @@ export async function startAgent(
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
+    .pipe("projectRules", () => projectRules || null)
     .pipe("toolGuide", toolGuide())
     .pipe("deferredTools", deferredTools())
     .pipe("memoryContext", memoryContext(memoryStore))
@@ -348,6 +356,8 @@ export async function startAgent(
       currentDepth: 0,
       tracker,
       requestApproval,
+      workingDir,
+      ...(projectRules ? { projectRules } : {}),
     };
   }
 
@@ -358,6 +368,7 @@ export async function startAgent(
     model,
     registry,
     buildSystem: () => builder.build(makePromptCtx()),
+    workingDir,
   });
 
   if (config.channels.feishu.enabled) {
@@ -446,6 +457,7 @@ export async function startAgent(
           registry,
           messages: cronMessages,
           system,
+          workingDir,
           eventSink: terminalAgentEventSink,
         });
         const lastMessage = cronMessages[cronMessages.length - 1];
@@ -563,6 +575,7 @@ export async function startAgent(
         registry,
         messages,
         system: modePolicy.system,
+        workingDir,
         tracker,
         onStepUsage: async (usage, responseMessages, needsFollowUp) => {
           const promptTokens = promptTokensFromUsage(usage);
@@ -648,6 +661,7 @@ export async function startAgent(
       }
 
       const ctx: CommandContext = {
+        workingDir,
         messages,
         timestamps,
         registry,

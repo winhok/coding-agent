@@ -32,6 +32,7 @@ export const dreamCommands: CommandHandler[] = [
       registry: ctx.registry,
       messages: ctx.messages,
       system: currentSystem,
+      workingDir: ctx.workingDir,
       tracker: ctx.tracker,
       eventSink: terminalAgentEventSink,
     }).then(({ appendedMessages }) => {

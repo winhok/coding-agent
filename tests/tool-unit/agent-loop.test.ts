@@ -4,6 +4,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { type AgentEvent, agentLoop } from "../../src/agent/loop.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
+import { createToolSearchTool } from "../../src/tools/tool-search.ts";
 
 const TEST_USAGE = {
   inputTokens: {
@@ -16,6 +17,142 @@ const TEST_USAGE = {
 };
 
 describe("agent loop interface", () => {
+  it("executes multiple tool calls and feeds their results into the next model step", async () => {
+    let modelCalls = 0;
+    const observedValues: string[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        modelCalls++;
+        if (modelCalls === 2) {
+          const prompt = JSON.stringify(options.prompt);
+          assert.match(prompt, /echo:alpha/);
+          assert.match(prompt, /echo:beta/);
+          return textStream("两个工具都已完成");
+        }
+        return toolCallStream([
+          { id: "call-1", name: "echo", input: { value: "alpha" } },
+          { id: "call-2", name: "echo", input: { value: "beta" } },
+        ]);
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "echo",
+      description: "echo",
+      parameters: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+      isReadOnly: true,
+      execute: async ({ value }: { value: string }) => {
+        observedValues.push(value);
+        return `echo:${value}`;
+      },
+    });
+
+    const result = await agentLoop({
+      model,
+      registry,
+      messages: [{ role: "user", content: "echo twice" }],
+      system: "test",
+      workingDir: process.cwd(),
+    });
+
+    assert.equal(result.text, "两个工具都已完成");
+    assert.equal(result.stats.steps, 2);
+    assert.equal(result.stats.toolCalls, 2);
+    assert.deepEqual(observedValues.sort(), ["alpha", "beta"]);
+  });
+
+  it("makes an exactly discovered deferred tool available on the next step", async () => {
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        modelCalls++;
+        if (modelCalls === 1) {
+          assert.doesNotMatch(JSON.stringify(options.tools), /deferred_tool/);
+          return toolCallStream([
+            {
+              id: "search-1",
+              name: "tool_search",
+              input: { query: "deferred_tool" },
+            },
+          ]);
+        }
+        if (modelCalls === 2) {
+          assert.match(JSON.stringify(options.tools), /deferred_tool/);
+          return toolCallStream([
+            { id: "deferred-1", name: "deferred_tool", input: {} },
+          ]);
+        }
+        return textStream("deferred complete");
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "deferred_tool",
+      description: "deferred",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      shouldDefer: true,
+      execute: async () => "deferred result",
+    });
+    registry.register(createToolSearchTool(registry));
+
+    const result = await agentLoop({
+      model,
+      registry,
+      messages: [{ role: "user", content: "discover" }],
+      system: "test",
+      workingDir: process.cwd(),
+    });
+
+    assert.equal(result.text, "deferred complete");
+    assert.equal(result.stats.steps, 3);
+    assert.equal(result.stats.toolCalls, 2);
+  });
+
+  it("feeds an approval rejection back to the model without executing the tool", async () => {
+    let modelCalls = 0;
+    let executed = false;
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        modelCalls++;
+        if (modelCalls === 1) {
+          return toolCallStream([{ id: "write-1", name: "mutate", input: {} }]);
+        }
+        assert.match(JSON.stringify(options.prompt), /用户拒绝/);
+        return textStream("已停止修改");
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "mutate",
+      description: "mutate",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: false,
+      execute: async () => {
+        executed = true;
+        return "changed";
+      },
+    });
+
+    const result = await agentLoop({
+      model,
+      registry,
+      messages: [{ role: "user", content: "mutate" }],
+      system: "test",
+      workingDir: process.cwd(),
+      requestApproval: async () => false,
+    });
+
+    assert.equal(executed, false);
+    assert.equal(result.text, "已停止修改");
+    assert.equal(result.stats.steps, 2);
+  });
+
   it("returns a structured completed result and emits typed events", async () => {
     const events: AgentEvent[] = [];
     const model = new MockLanguageModelV4({
@@ -42,6 +179,7 @@ describe("agent loop interface", () => {
       registry: new ToolRegistry(),
       messages,
       system: "test",
+      workingDir: process.cwd(),
       eventSink: (event) => {
         events.push(event);
       },
@@ -86,6 +224,7 @@ describe("agent loop interface", () => {
       registry: new ToolRegistry(),
       messages: [{ role: "user", content: "测试" }],
       system: "test",
+      workingDir: process.cwd(),
       maxSteps: 0,
       eventSink: (event) => {
         events.push(event);
@@ -101,3 +240,44 @@ describe("agent loop interface", () => {
     );
   });
 });
+
+function toolCallStream(
+  calls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
+) {
+  return {
+    stream: simulateReadableStream({
+      chunks: [
+        ...calls.map((call) => ({
+          type: "tool-call" as const,
+          toolCallId: call.id,
+          toolName: call.name,
+          input: JSON.stringify(call.input),
+        })),
+        {
+          type: "finish" as const,
+          finishReason: { unified: "tool-calls" as const, raw: undefined },
+          logprobs: undefined,
+          usage: TEST_USAGE,
+        },
+      ],
+    }),
+  };
+}
+
+function textStream(text: string) {
+  return {
+    stream: simulateReadableStream({
+      chunks: [
+        { type: "text-start" as const, id: "text" },
+        { type: "text-delta" as const, id: "text", delta: text },
+        { type: "text-end" as const, id: "text" },
+        {
+          type: "finish" as const,
+          finishReason: { unified: "stop" as const, raw: undefined },
+          logprobs: undefined,
+          usage: TEST_USAGE,
+        },
+      ],
+    }),
+  };
+}

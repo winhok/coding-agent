@@ -1,5 +1,6 @@
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
-import { isTodoStatus, TODO_STATUSES, todoManager } from "./todo_manager.ts";
+import { isTodoStatus, TODO_STATUSES } from "./todo_manager.ts";
 
 export const updateTodoTool: ToolDefinition = {
   name: "update_todo",
@@ -23,7 +24,12 @@ export const updateTodoTool: ToolDefinition = {
   },
   isConcurrencySafe: false,
   isReadOnly: false,
-  execute: async ({ id, status }: { id?: unknown; status?: unknown }) => {
+  capabilities: ["state"],
+  execute: async (
+    { id, status }: { id?: unknown; status?: unknown },
+    context?: ToolExecutionContext,
+  ) => {
+    if (!context) return "错误：当前运行缺少任务状态上下文。";
     const normalizedId = typeof id === "string" ? id.trim() : "";
 
     if (!normalizedId) {
@@ -34,11 +40,11 @@ export const updateTodoTool: ToolDefinition = {
       return `错误：无效状态 "${String(status)}"，可选值: ${TODO_STATUSES.filter((value) => value !== "pending").join(", ")}`;
     }
 
-    const item = todoManager.updateStatus(normalizedId, status);
+    const item = context.todoManager.updateStatus(normalizedId, status);
     if (!item) {
       return `错误：未找到 ID 为 "${normalizedId}" 的步骤。`;
     }
 
-    return `步骤 #${item.id} "${item.description}" -> ${status}\n${todoManager.formatForPrompt()}`;
+    return `步骤 #${item.id} "${item.description}" -> ${status}\n${context.todoManager.formatForPrompt()}`;
   },
 };

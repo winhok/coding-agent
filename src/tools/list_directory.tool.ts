@@ -1,6 +1,8 @@
 import { readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
+import { resolveWorkspacePath } from "./workspace.js";
 
 export const listDirectoryTool: ToolDefinition = {
   name: "list_directory",
@@ -15,11 +17,18 @@ export const listDirectoryTool: ToolDefinition = {
   },
   isConcurrencySafe: true,
   isReadOnly: true,
-  execute: async ({ path = "." }: { path?: string }) => {
-    const resolved = resolve(path);
-    return readdirSync(resolved)
+  execute: async (
+    { path = "." }: { path?: string },
+    context?: ToolExecutionContext,
+  ) => {
+    const resolved = await resolveWorkspacePath(
+      context?.workingDir ?? process.cwd(),
+      path,
+      { mustExist: true },
+    );
+    return readdirSync(resolved.absolutePath)
       .map((name: string) => {
-        const stat = statSync(join(resolved, name));
+        const stat = statSync(join(resolved.absolutePath, name));
         return `${stat.isDirectory() ? "📁" : "📄"} ${name}`;
       })
       .join("\n");

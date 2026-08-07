@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
+import { resolveWorkspacePath } from "./workspace.js";
 
 const DEFAULT_MAX_RESULTS = 50;
 const MAX_RESULTS_LIMIT = 200;
@@ -26,33 +28,45 @@ export const grepTool: ToolDefinition = {
   isConcurrencySafe: true,
   isReadOnly: true,
   maxResultChars: 3000,
-  execute: async ({
-    pattern,
-    path = ".",
-    maxResults = DEFAULT_MAX_RESULTS,
-  }: {
-    pattern: string;
-    path?: string;
-    maxResults?: number;
-  }) => {
-    const limit = normalizeMaxResults(maxResults);
-    const args = [
-      "--line-number",
-      "--with-filename",
-      "--no-heading",
-      "--color",
-      "never",
-      "--",
+  execute: async (
+    {
       pattern,
-      path,
-    ];
+      path = ".",
+      maxResults = DEFAULT_MAX_RESULTS,
+    }: { pattern: string; path?: string; maxResults?: number },
+    context?: ToolExecutionContext,
+  ) => {
+    const limit = normalizeMaxResults(maxResults);
+    try {
+      const target = await resolveWorkspacePath(
+        context?.workingDir ?? process.cwd(),
+        path,
+        { mustExist: true },
+      );
+      const args = [
+        "--line-number",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+        "--",
+        pattern,
+        target.relativePath,
+      ];
 
-    const { matches, truncated, error } = await runRipgrep(args, limit);
-    if (error !== undefined) return `搜索出错：${error}`;
-    if (matches.length === 0) return `没有找到匹配 "${pattern}" 的内容`;
+      const { matches, truncated, error } = await runRipgrep(
+        args,
+        limit,
+        context?.workingDir ?? process.cwd(),
+      );
+      if (error !== undefined) return `搜索出错：${error}`;
+      if (matches.length === 0) return `没有找到匹配 "${pattern}" 的内容`;
 
-    const suffix = truncated ? `\n\n... 仅显示前 ${limit} 条` : "";
-    return matches.join("\n") + suffix;
+      const suffix = truncated ? `\n\n... 仅显示前 ${limit} 条` : "";
+      return matches.join("\n") + suffix;
+    } catch (error) {
+      return `搜索出错：${error instanceof Error ? error.message : String(error)}`;
+    }
   },
 };
 
@@ -64,9 +78,10 @@ function normalizeMaxResults(value: number): number {
 async function runRipgrep(
   args: string[],
   limit: number,
+  cwd: string,
 ): Promise<{ matches: string[]; truncated: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn("rg", args);
+    const child = spawn("rg", args, { cwd });
     const matches: string[] = [];
     let stdoutBuffer = "";
     let stderr = "";

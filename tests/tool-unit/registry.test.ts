@@ -1,13 +1,42 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createAgentRunContext } from "../../src/agent/run-context.ts";
+import { createTodosTool } from "../../src/tools/create_todos.tool.ts";
 import {
   type ToolDefinition,
   ToolRegistry,
   truncateResult,
 } from "../../src/tools/registry.ts";
+import { updateTodoTool } from "../../src/tools/update_todo.tool.ts";
 import { withMutedConsole } from "../helpers.ts";
 
 describe("tool-unit registry", () => {
+  it("isolates todo state between agent run contexts", async () => {
+    const registry = new ToolRegistry();
+    registry.register(createTodosTool, updateTodoTool);
+    const firstRun = registry.toAISDKFormat(
+      createAgentRunContext(process.cwd()),
+    );
+    const secondRun = registry.toAISDKFormat(
+      createAgentRunContext(process.cwd()),
+    );
+
+    await firstRun.create_todos?.execute({ todos: ["first run"] });
+
+    assert.match(
+      String(
+        await secondRun.update_todo?.execute({ id: "1", status: "completed" }),
+      ),
+      /未找到/,
+    );
+    assert.match(
+      String(
+        await firstRun.update_todo?.execute({ id: "1", status: "completed" }),
+      ),
+      /first run/,
+    );
+  });
+
   it("truncates long tool results while preserving head and tail", () => {
     const result = truncateResult("abcdefghij", 6);
 

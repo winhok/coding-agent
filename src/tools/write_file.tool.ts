@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname } from "node:path";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
+import { resolveWorkspacePath, WorkspacePathError } from "./workspace.js";
 
 export const writeFileTool: ToolDefinition = {
   name: "write_file",
@@ -17,41 +19,28 @@ export const writeFileTool: ToolDefinition = {
   },
   isConcurrencySafe: false, // 写操作不能并行
   isReadOnly: false, // 写操作不能是只读的
-  execute: async ({ path, content }: { path: string; content: string }) => {
-    const workspaceDir = resolve(process.cwd());
-    const filePath = resolve(workspaceDir, path);
-    const relativePath = relative(workspaceDir, filePath);
-
-    if (isOutsideWorkspace(relativePath)) {
-      return "错误：不能写入工作目录之外的文件。";
-    }
-
-    if (hasGitSegment(relativePath)) {
-      return "错误：不允许修改 .git 目录下的文件。";
-    }
-
+  execute: async (
+    { path, content }: { path: string; content: string },
+    context?: ToolExecutionContext,
+  ) => {
     try {
-      await mkdir(dirname(filePath), { recursive: true });
-      await writeFile(filePath, content, "utf-8");
+      const resolved = await resolveWorkspacePath(
+        context?.workingDir ?? process.cwd(),
+        path,
+        { mustExist: false, forbidGit: true },
+      );
+      await mkdir(dirname(resolved.absolutePath), { recursive: true });
+      await writeFile(resolved.absolutePath, content, "utf-8");
 
       const lineCount = content.split("\n").length;
-      return `已写入 ${content.length} 字符到 ${relativePath}（${lineCount} 行）`;
+      return `已写入 ${content.length} 字符到 ${resolved.relativePath}（${lineCount} 行）`;
     } catch (error: unknown) {
+      if (error instanceof WorkspacePathError) {
+        return error.message.includes(".git")
+          ? `错误：${error.message}。`
+          : "错误：不能写入工作目录之外的文件。";
+      }
       return `写入文件出错：${String(error)}`;
     }
   },
 };
-
-function isOutsideWorkspace(relativePath: string): boolean {
-  return (
-    relativePath === "" ||
-    relativePath === ".." ||
-    relativePath.startsWith("../") ||
-    relativePath.startsWith("..\\") ||
-    isAbsolute(relativePath)
-  );
-}
-
-function hasGitSegment(relativePath: string): boolean {
-  return relativePath.split(/[\\/]+/).includes(".git");
-}

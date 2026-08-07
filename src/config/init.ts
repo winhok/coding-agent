@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { createInterface } from "node:readline";
+import { DEFAULT_ROLE_POLICIES } from "../security/roles.js";
 import { CONFIG_FILE } from "./loader.js";
 import { DEFAULT_AGENT_PROFILES } from "./schema.js";
 
@@ -70,7 +71,12 @@ export async function runInit(): Promise<void> {
       defaultTimeout: 60_000,
       profiles: DEFAULT_AGENT_PROFILES,
     },
-    security: { defaultRole: "owner", auditLog: true, bashTimestamp: true },
+    security: {
+      defaultRole: "owner",
+      roles: DEFAULT_ROLE_POLICIES,
+      auditLog: true,
+      bashTimestamp: true,
+    },
     memory: { dataDir: "." },
     rag: { enabled: true, docsDir: "docs" },
     cron: { enabled: true, dataDir: "." },

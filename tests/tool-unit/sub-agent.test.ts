@@ -132,6 +132,7 @@ describe("tool-unit sub-agent", () => {
             agentRegistry,
             profiles,
             currentDepth: 0,
+            workingDir: process.cwd(),
             traceDirectory,
           },
         ),

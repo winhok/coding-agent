@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
+import { resolveWorkspacePath } from "./workspace.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,7 +28,10 @@ export const gitDiffTool: ToolDefinition = {
   isConcurrencySafe: true,
   isReadOnly: true,
   maxResultChars: MAX_DIFF_LENGTH + 200,
-  execute: async (input: { path?: unknown; staged?: unknown }) => {
+  execute: async (
+    input: { path?: unknown; staged?: unknown },
+    context?: ToolExecutionContext,
+  ) => {
     const staged = input.staged === true;
     const path =
       typeof input.path === "string" && input.path.trim()
@@ -35,11 +40,17 @@ export const gitDiffTool: ToolDefinition = {
 
     const args = ["diff"];
     if (staged) args.push("--staged");
-    if (path) args.push("--", path);
-
     try {
+      if (path) {
+        const resolved = await resolveWorkspacePath(
+          context?.workingDir ?? process.cwd(),
+          path,
+          { mustExist: true },
+        );
+        args.push("--", resolved.relativePath);
+      }
       const { stdout } = await execFileAsync("git", args, {
-        cwd: process.cwd(),
+        cwd: context?.workingDir ?? process.cwd(),
         maxBuffer: 1024 * 1024,
       });
 

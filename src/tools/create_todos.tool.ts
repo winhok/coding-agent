@@ -1,5 +1,5 @@
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
-import { todoManager } from "./todo_manager.ts";
 
 export const createTodosTool: ToolDefinition = {
   name: "create_todos",
@@ -19,7 +19,12 @@ export const createTodosTool: ToolDefinition = {
   },
   isConcurrencySafe: false,
   isReadOnly: false,
-  execute: async ({ todos }: { todos?: unknown }) => {
+  capabilities: ["state"],
+  execute: async (
+    { todos }: { todos?: unknown },
+    context?: ToolExecutionContext,
+  ) => {
+    if (!context) return "错误：当前运行缺少任务状态上下文。";
     if (!Array.isArray(todos)) {
       return "错误：todos 必须是字符串数组。";
     }
@@ -32,7 +37,7 @@ export const createTodosTool: ToolDefinition = {
       return "错误：todos 至少需要包含一个非空步骤。";
     }
 
-    todoManager.create(descriptions);
-    return `已创建 ${descriptions.length} 个计划步骤：\n${todoManager.formatForPrompt()}`;
+    context.todoManager.create(descriptions);
+    return `已创建 ${descriptions.length} 个计划步骤：\n${context.todoManager.formatForPrompt()}`;
   },
 };

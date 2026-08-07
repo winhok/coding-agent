@@ -18,9 +18,8 @@ export type RequestApproval = (request: ApprovalRequest) => Promise<boolean>;
 interface PermissionTool {
   name: string;
   isReadOnly?: boolean;
+  capabilities?: readonly string[];
 }
-
-const SAFE_INTERNAL_TOOLS = new Set(["create_todos", "update_todo"]);
 
 /**
  * Resolves the default permission for the final, validated tool input.
@@ -50,7 +49,7 @@ export function decideToolPermission(
     };
   }
 
-  if (SAFE_INTERNAL_TOOLS.has(tool.name)) {
+  if (tool.capabilities?.includes("state")) {
     return { level: "allow", reason: "仅更新当前任务的内部状态" };
   }
 

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry";
 
 const execFileAsync = promisify(execFile);
@@ -16,10 +17,10 @@ export const gitStatusTool: ToolDefinition = {
   },
   isConcurrencySafe: true,
   isReadOnly: true,
-  execute: async () => {
+  execute: async (_input, context?: ToolExecutionContext) => {
     try {
       const { stdout } = await execFileAsync("git", ["status", "--short"], {
-        cwd: process.cwd(),
+        cwd: context?.workingDir ?? process.cwd(),
         maxBuffer: 1024 * 1024,
       });
 
