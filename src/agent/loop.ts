@@ -5,8 +5,7 @@ import {
   type ModelMessage,
   streamText,
 } from "ai";
-import type { RequestApproval } from "../security/permissions.js";
-import type { ToolRegistry, ToolSelection } from "../tools/registry.js";
+import type { ToolRegistry } from "../tools/registry.js";
 import type { LocalTraceRecorder } from "../trace/recorder.js";
 import {
   normalizeUsage,
@@ -21,7 +20,7 @@ import type {
 } from "./events.js";
 import { ToolLoopDetector } from "./loop-detection.js";
 import { calculateDelay, isRetryable, sleep } from "./retry.js";
-import { createAgentRunContext } from "./run-context.js";
+import type { AgentRunContext } from "./run-context.js";
 
 const MAX_STEPS = 50;
 const MAX_RETRIES = 3;
@@ -31,7 +30,7 @@ export interface AgentLoopOptions {
   registry: ToolRegistry;
   messages: ModelMessage[];
   system: string;
-  workingDir: string;
+  runContext: AgentRunContext;
   tracker?: UsageTracker;
   onStepUsage?: (
     usage: StepUsage,
@@ -42,9 +41,6 @@ export interface AgentLoopOptions {
   eventSink?: AgentEventSink;
   maxSteps?: number;
   maxRetries?: number;
-  requestApproval?: RequestApproval;
-  toolSelection?: ToolSelection;
-  abortSignal?: AbortSignal;
   forceFinalStep?: boolean;
 }
 
@@ -60,16 +56,13 @@ export async function agentLoop({
   registry,
   messages,
   system,
-  workingDir,
+  runContext,
   tracker,
   onStepUsage,
   trace,
   eventSink,
   maxSteps = MAX_STEPS,
   maxRetries = MAX_RETRIES,
-  requestApproval,
-  toolSelection,
-  abortSignal,
   forceFinalStep = false,
 }: AgentLoopOptions): Promise<AgentLoopResult> {
   let step = 0;
@@ -80,11 +73,6 @@ export async function agentLoop({
   const totalUsage = { ...EMPTY_USAGE };
   const appendedMessages: ModelMessage[] = [];
   const loopDetector = new ToolLoopDetector();
-  const runContext = createAgentRunContext(workingDir);
-  const toolExecutionContext = requestApproval
-    ? { ...runContext, requestApproval }
-    : runContext;
-
   const emit = async (event: Parameters<AgentEventSink>[0]) => {
     await eventSink?.(event);
   };
@@ -119,11 +107,11 @@ export async function agentLoop({
           const result = streamText({
             model,
             system,
-            tools: registry.toAISDKFormat(toolExecutionContext, toolSelection),
+            tools: registry.toAISDKFormat(runContext),
             toolChoice: isLastStep ? "none" : "auto",
             messages,
             maxRetries: 0,
-            ...(abortSignal ? { abortSignal } : {}),
+            abortSignal: runContext.signal,
             providerOptions: { openai: { parallelToolCalls: true } },
             onError: () => {},
           });

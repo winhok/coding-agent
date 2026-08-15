@@ -1,5 +1,6 @@
 import Ajv, { type ValidateFunction } from "ajv";
 import type { AgentRunContext } from "../agent/run-context.js";
+import { abortReason, raceWithAbort } from "../security/abort.js";
 import type { HookPipeline } from "../security/hooks.js";
 import {
   decideToolPermission,
@@ -29,7 +30,8 @@ export interface ExecutableTool {
 }
 
 export interface ToolExecutionContext extends AgentRunContext {
-  requestApproval?: RequestApproval;
+  toolName?: string;
+  toolCallId?: string;
 }
 
 export type { ToolCapability } from "./capabilities.js";
@@ -44,6 +46,7 @@ interface ExecuteOptions {
 
 export type ToolExecutionOutcome =
   | "completed"
+  | "aborted"
   | "blocked"
   | "invalid"
   | "denied"
@@ -58,7 +61,12 @@ export interface ToolExecutionAuditEntry {
   reason?: string;
   permission?: {
     level: PermissionLevel;
-    approval: "not_required" | "approved" | "rejected" | "unavailable";
+    approval:
+      | "not_required"
+      | "approved"
+      | "rejected"
+      | "cancelled"
+      | "unavailable";
   };
 }
 
@@ -89,6 +97,7 @@ export class ToolExecutionPipeline {
     }: ExecuteOptions,
   ): Promise<string> {
     const startedAt = Date.now();
+    executionContext.signal.throwIfAborted();
 
     if (hookPipeline) {
       const preResult = await hookPipeline.runPre(tool.name, input);
@@ -103,6 +112,7 @@ export class ToolExecutionPipeline {
       ) {
         input = preResult.modifiedInput;
       }
+      executionContext.signal.throwIfAborted();
     }
 
     const validationError = this.validateInput(tool, input);
@@ -154,12 +164,32 @@ export class ToolExecutionPipeline {
 
       let approved = false;
       try {
-        approved = await requestApproval({
-          tool: tool.name,
-          input: validatedInput,
-          reason: decision.reason,
-        });
+        approved = await raceWithAbort(
+          requestApproval({
+            tool: tool.name,
+            input: validatedInput,
+            reason: decision.reason,
+            ...(executionContext.toolCallId
+              ? { toolCallId: executionContext.toolCallId }
+              : {}),
+            signal: executionContext.signal,
+          }),
+          executionContext.signal,
+        );
+        executionContext.signal.throwIfAborted();
       } catch (error) {
+        if (executionContext.signal.aborted) {
+          const reason = abortReason(executionContext.signal);
+          this.recordAudit(
+            tool.name,
+            validatedInput,
+            "aborted",
+            startedAt,
+            reason.message,
+            { level: decision.level, approval: "cancelled" },
+          );
+          throw reason;
+        }
         const message = error instanceof Error ? error.message : String(error);
         const reason = `${decision.reason}，审批失败: ${message}`;
         this.recordAudit(
@@ -199,7 +229,9 @@ export class ToolExecutionPipeline {
     }
 
     try {
+      executionContext.signal.throwIfAborted();
       const raw = await tool.execute(validatedInput, executionContext);
+      executionContext.signal.throwIfAborted();
       const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
       let output = truncateResult(text, tool.maxResultChars);
 
@@ -212,6 +244,7 @@ export class ToolExecutionPipeline {
         if (postResult.modifiedOutput !== undefined) {
           output = String(postResult.modifiedOutput);
         }
+        executionContext.signal.throwIfAborted();
       }
 
       this.recordAudit(
@@ -224,10 +257,11 @@ export class ToolExecutionPipeline {
       );
       return output;
     } catch (error) {
+      const aborted = executionContext.signal.aborted;
       this.recordAudit(
         tool.name,
         validatedInput,
-        "failed",
+        aborted ? "aborted" : "failed",
         startedAt,
         error instanceof Error ? error.message : String(error),
         permission,

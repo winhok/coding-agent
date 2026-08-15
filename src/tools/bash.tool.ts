@@ -55,10 +55,14 @@ export const bashTool: ToolDefinition = {
         cwd: context?.workingDir ?? process.cwd(),
         timeout,
         maxBuffer: 1024 * 1024,
+        ...(context?.signal ? { signal: context.signal } : {}),
       });
 
       return formatCommandResult(stdout, stderr);
     } catch (error: unknown) {
+      if (context?.signal.aborted) {
+        context.signal.throwIfAborted();
+      }
       return formatCommandError(error);
     }
   },

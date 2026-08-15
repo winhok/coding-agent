@@ -11,6 +11,8 @@ export interface ApprovalRequest {
   tool: string;
   input: unknown;
   reason: string;
+  toolCallId?: string;
+  signal?: AbortSignal;
 }
 
 export type RequestApproval = (request: ApprovalRequest) => Promise<boolean>;

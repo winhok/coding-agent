@@ -2,9 +2,21 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classifyBashCommand } from "../../src/security/bash-classifier.ts";
 import { HookPipeline } from "../../src/security/hooks.ts";
+import type { RequestApproval } from "../../src/security/permissions.ts";
 import { canUseTool, filterToolsForRole } from "../../src/security/roles.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
-import { withMutedConsole } from "../helpers.ts";
+import { createTestRunContext, withMutedConsole } from "../helpers.ts";
+
+function formatTools(
+  registry: ToolRegistry,
+  requestApproval?: RequestApproval,
+) {
+  return registry.toAISDKFormat(
+    createTestRunContext(registry, {
+      ...(requestApproval ? { requestApproval } : {}),
+    }),
+  );
+}
 
 describe("security roles", () => {
   it("applies owner, collaborator, and guest tool access", () => {
@@ -42,16 +54,13 @@ describe("security roles", () => {
     );
 
     assert.equal(registry.getRole(), "owner");
-    assert.deepEqual(Object.keys(registry.toAISDKFormat()), [
-      "read_file",
-      "bash",
-    ]);
+    assert.deepEqual(Object.keys(formatTools(registry)), ["read_file", "bash"]);
 
     registry.setRole("collaborator");
-    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
+    assert.deepEqual(Object.keys(formatTools(registry)), ["read_file"]);
 
     registry.setRole("guest");
-    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
+    assert.deepEqual(Object.keys(formatTools(registry)), ["read_file"]);
   });
 
   it("applies configured capability policies and tool exceptions", () => {
@@ -91,9 +100,9 @@ describe("security roles", () => {
     });
 
     registry.setRole("collaborator");
-    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
+    assert.deepEqual(Object.keys(formatTools(registry)), ["read_file"]);
     registry.setRole("guest");
-    assert.deepEqual(Object.keys(registry.toAISDKFormat()), ["read_file"]);
+    assert.deepEqual(Object.keys(formatTools(registry)), ["read_file"]);
   });
 
   it("does not reveal or discover deferred tools denied to the role", () => {
@@ -158,7 +167,7 @@ describe("bash classifier", () => {
       },
     });
 
-    const bash = registry.toAISDKFormat().bash;
+    const bash = formatTools(registry).bash;
     assert.ok(bash);
     const output = await bash.execute({ command: "sudo rm -rf /" });
 
@@ -190,7 +199,7 @@ describe("bash classifier", () => {
       },
     });
 
-    const bash = registry.toAISDKFormat().bash;
+    const bash = formatTools(registry).bash;
     assert.ok(bash);
     const output = await withMutedConsole(() =>
       bash.execute({ command: "pwd" }),
@@ -225,7 +234,7 @@ describe("bash classifier", () => {
       },
     });
 
-    const bash = registry.toAISDKFormat().bash;
+    const bash = formatTools(registry).bash;
     assert.ok(bash);
     const output = await withMutedConsole(() =>
       bash.execute({ command: "pwd" }),
@@ -236,23 +245,55 @@ describe("bash classifier", () => {
     assert.equal(registry.getExecutionAuditLog().at(-1)?.outcome, "invalid");
   });
 
-  it("authorizes against the current role immediately before execution", async () => {
+  it("re-authorizes an existing run view against the current role", async () => {
     let executed = false;
     const registry = new ToolRegistry();
     registry.register({
-      name: "bash",
-      description: "bash",
+      name: "run_task",
+      description: "run task",
       parameters: { type: "object", properties: {} },
+      capabilities: ["execute"],
+      isReadOnly: true,
       execute: async () => {
         executed = true;
         return "executed";
       },
     });
-    const bashFromOwnerSnapshot = registry.toAISDKFormat().bash;
-    assert.ok(bashFromOwnerSnapshot);
+    const toolFromOwnerSnapshot = formatTools(registry).run_task;
+    assert.ok(toolFromOwnerSnapshot);
 
     registry.setRole("collaborator");
-    const output = await bashFromOwnerSnapshot.execute({});
+    const output = await toolFromOwnerSnapshot.execute({});
+
+    assert.equal(executed, false);
+    assert.match(output, /^\[拒绝执行\]/);
+    assert.equal(registry.getExecutionAuditLog().at(-1)?.outcome, "denied");
+    assert.equal(formatTools(registry).run_task, undefined);
+  });
+
+  it("re-authorizes an existing run view against current role policies", async () => {
+    let executed = false;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "run_task",
+      description: "run task",
+      parameters: { type: "object", properties: {} },
+      capabilities: ["execute"],
+      isReadOnly: true,
+      execute: async () => {
+        executed = true;
+        return "executed";
+      },
+    });
+    const toolFromOriginalPolicy = formatTools(registry).run_task;
+    assert.ok(toolFromOriginalPolicy);
+
+    registry.setRolePolicies({
+      owner: { capabilities: ["read"] },
+      collaborator: { capabilities: ["read"] },
+      guest: { capabilities: ["read"] },
+    });
+    const output = await toolFromOriginalPolicy.execute({});
 
     assert.equal(executed, false);
     assert.match(output, /^\[拒绝执行\]/);
@@ -270,11 +311,9 @@ describe("bash classifier", () => {
       execute: async () => "ok",
     });
 
-    const tool = registry.toAISDKFormat({
-      requestApproval: async () => {
-        approvalRequested = true;
-        return false;
-      },
+    const tool = formatTools(registry, async () => {
+      approvalRequested = true;
+      return false;
     }).read_only;
     assert.ok(tool);
 
@@ -296,7 +335,7 @@ describe("bash classifier", () => {
       capabilities: ["state"],
       execute: async () => "planned",
     });
-    const tool = registry.toAISDKFormat().create_todos;
+    const tool = formatTools(registry).create_todos;
     assert.ok(tool);
 
     assert.equal(await tool.execute({}), "planned");
@@ -327,11 +366,9 @@ describe("bash classifier", () => {
       execute: async (input) => String(input.path),
     });
 
-    const tool = registry.toAISDKFormat({
-      requestApproval: async (request) => {
-        seen.push(request.input);
-        return true;
-      },
+    const tool = formatTools(registry, async (request) => {
+      seen.push(request.input);
+      return true;
     }).write_file;
     assert.ok(tool);
 
@@ -359,13 +396,11 @@ describe("bash classifier", () => {
       },
     });
 
-    const unavailable = registry.toAISDKFormat().unknown_tool;
+    const unavailable = formatTools(registry).unknown_tool;
     assert.ok(unavailable);
     assert.match(await unavailable.execute({}), /没有审批通道/);
 
-    const rejected = registry.toAISDKFormat({
-      requestApproval: async () => false,
-    }).unknown_tool;
+    const rejected = formatTools(registry, async () => false).unknown_tool;
     assert.ok(rejected);
     assert.match(await rejected.execute({}), /用户拒绝/);
     assert.equal(executed, false);
@@ -373,6 +408,53 @@ describe("bash classifier", () => {
       level: "ask",
       approval: "rejected",
     });
+  });
+
+  it("aborts a pending approval promptly and audits the cancellation", async () => {
+    let approvalStarted: (() => void) | undefined;
+    let rejectApproval: ((error: Error) => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      approvalStarted = resolve;
+    });
+    const controller = new AbortController();
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "write_file",
+      description: "write",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: false,
+      execute: async () => "unexpected",
+    });
+    const tool = registry.toAISDKFormat(
+      createTestRunContext(registry, {
+        signal: controller.signal,
+        requestApproval: async (request) => {
+          assert.equal(request.signal, controller.signal);
+          approvalStarted?.();
+          return new Promise<boolean>((_resolve, reject) => {
+            rejectApproval = reject;
+          });
+        },
+      }),
+    ).write_file;
+    assert.ok(tool);
+
+    const execution = tool.execute({});
+    await started;
+    controller.abort(new DOMException("approval timed out", "AbortError"));
+
+    await assert.rejects(execution, /approval timed out/);
+    assert.deepEqual(registry.getExecutionAuditLog().at(-1), {
+      timestamp: registry.getExecutionAuditLog().at(-1)?.timestamp,
+      durationMs: registry.getExecutionAuditLog().at(-1)?.durationMs,
+      tool: "write_file",
+      input: {},
+      outcome: "aborted",
+      reason: "approval timed out",
+      permission: { level: "ask", approval: "cancelled" },
+    });
+    rejectApproval?.(new Error("late approval failure"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   });
 
   it("redacts secrets from the execution audit", async () => {
@@ -384,7 +466,7 @@ describe("bash classifier", () => {
       isReadOnly: true,
       execute: async () => "ok",
     });
-    const tool = registry.toAISDKFormat().read_only;
+    const tool = formatTools(registry).read_only;
     assert.ok(tool);
 
     await tool.execute({
@@ -428,7 +510,7 @@ describe("hook pipeline", () => {
       execute: async (input: { value: number }) => String(input.value),
     });
 
-    const customTool = registry.toAISDKFormat().custom_tool;
+    const customTool = formatTools(registry).custom_tool;
     assert.ok(customTool);
     const output = await withMutedConsole(() =>
       customTool.execute({ value: 1 }),
@@ -474,7 +556,7 @@ describe("hook pipeline", () => {
       },
     });
 
-    const customTool = registry.toAISDKFormat().custom_tool;
+    const customTool = formatTools(registry).custom_tool;
     assert.ok(customTool);
 
     const originalError = console.error;
@@ -500,7 +582,7 @@ describe("hook pipeline", () => {
         throw new Error("boom");
       },
     });
-    const failingTool = registry.toAISDKFormat().failing_tool;
+    const failingTool = formatTools(registry).failing_tool;
     assert.ok(failingTool);
 
     await assert.rejects(() => failingTool.execute({}), /boom/);

@@ -1,4 +1,5 @@
 import type { LanguageModel, ModelMessage } from "ai";
+import type { AgentRunContext } from "../agent/run-context.js";
 import type { TokenMeasurement } from "../context/defense.js";
 import type {
   PromptBuilder,
@@ -20,6 +21,8 @@ export interface CommandContext {
   sessionStore: SessionStore;
   model: LanguageModel;
   makePromptCtx: () => PromptContext;
+  createRunContext: () => AgentRunContext;
+  buildSystem: (runContext: AgentRunContext) => string;
   ask: () => void;
   runUserTurn: (message: ModelMessage) => void;
   replaceMessages: (messages: ModelMessage[]) => void;

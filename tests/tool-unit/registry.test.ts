@@ -1,25 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createAgentRunContext } from "../../src/agent/run-context.ts";
 import { createTodosTool } from "../../src/tools/create_todos.tool.ts";
 import {
   type ToolDefinition,
   ToolRegistry,
   truncateResult,
 } from "../../src/tools/registry.ts";
+import { createToolSearchTool } from "../../src/tools/tool-search.ts";
 import { updateTodoTool } from "../../src/tools/update_todo.tool.ts";
-import { withMutedConsole } from "../helpers.ts";
+import { createTestRunContext, withMutedConsole } from "../helpers.ts";
 
 describe("tool-unit registry", () => {
   it("isolates todo state between agent run contexts", async () => {
     const registry = new ToolRegistry();
     registry.register(createTodosTool, updateTodoTool);
-    const firstRun = registry.toAISDKFormat(
-      createAgentRunContext(process.cwd()),
-    );
-    const secondRun = registry.toAISDKFormat(
-      createAgentRunContext(process.cwd()),
-    );
+    const firstRun = registry.toAISDKFormat(createTestRunContext(registry));
+    const secondRun = registry.toAISDKFormat(createTestRunContext(registry));
 
     await firstRun.create_todos?.execute({ todos: ["first run"] });
 
@@ -83,9 +79,9 @@ describe("tool-unit registry", () => {
 
     const registry = new ToolRegistry();
     registry.register(safeRead, exclusiveWrite);
-    const formatted = registry.toAISDKFormat({
-      requestApproval: async () => true,
-    });
+    const formatted = registry.toAISDKFormat(
+      createTestRunContext(registry, { requestApproval: async () => true }),
+    );
     const formattedRead = formatted.safe_read;
     const formattedWrite = formatted.exclusive_write;
     assert.ok(formattedRead);
@@ -128,7 +124,7 @@ describe("tool-unit registry", () => {
 
     const registry = new ToolRegistry();
     registry.register(makeReadTool("read_a"), makeReadTool("read_b"));
-    const formatted = registry.toAISDKFormat();
+    const formatted = registry.toAISDKFormat(createTestRunContext(registry));
     const firstRead = formatted.read_a;
     const secondRead = formatted.read_b;
     assert.ok(firstRead);
@@ -174,11 +170,15 @@ describe("tool-unit registry", () => {
       },
     );
 
-    const selected = registry.toAISDKFormat(undefined, {
-      allowedCapabilities: new Set(["read"]),
-      deniedCapabilities: new Set(["delegate"]),
-      allowedTools: new Set(["child_read", "child_write"]),
-    });
+    const selected = registry.toAISDKFormat(
+      createTestRunContext(registry, {
+        selection: {
+          allowedCapabilities: new Set(["read"]),
+          deniedCapabilities: new Set(["delegate"]),
+          allowedTools: new Set(["child_read", "child_write"]),
+        },
+      }),
+    );
 
     assert.deepEqual(Object.keys(selected), ["child_read"]);
   });
@@ -203,15 +203,18 @@ describe("tool-unit registry", () => {
       isReadOnly: true,
       capabilities: ["delegate"],
       holdsExecutionLock: false,
-      execute: async () => {
-        const child = registry.toAISDKFormat().child_read;
+      execute: async (_input, context) => {
+        assert.ok(context);
+        const child = registry.toAISDKFormat(context).child_read;
         assert.ok(child);
         return child.execute({});
       },
     });
 
     assert.equal(
-      await registry.toAISDKFormat().spawn_agent?.execute({}),
+      await registry
+        .toAISDKFormat(createTestRunContext(registry))
+        .spawn_agent?.execute({}),
       "child",
     );
     assert.equal(childRan, true);
@@ -251,19 +254,173 @@ describe("tool-unit registry", () => {
       execute: async () => "[]",
     });
 
-    assert.deepEqual(registry.getActiveTools(), []);
-    assert.equal(registry.toAISDKFormat().mcp__github__list_issues, undefined);
-    assert.match(registry.getDeferredToolSummary(), /github issues/);
-
+    const runContext = createTestRunContext(registry);
+    assert.deepEqual(runContext.toolView.getActiveTools(), []);
     assert.equal(
-      registry.searchTools("mcp__github__list_issues")[0]?.name,
-      "mcp__github__list_issues",
-    );
-    assert.equal(registry.getActiveTools().length, 1);
-    assert.notEqual(
-      registry.toAISDKFormat().mcp__github__list_issues,
+      registry.toAISDKFormat(runContext).mcp__github__list_issues,
       undefined,
     );
+    assert.match(runContext.toolView.getDeferredToolSummary(), /github issues/);
+
+    assert.equal(
+      runContext.toolView.searchTools("mcp__github__list_issues")[0]?.name,
+      "mcp__github__list_issues",
+    );
+    assert.equal(runContext.toolView.getActiveTools().length, 1);
+    assert.notEqual(
+      registry.toAISDKFormat(runContext).mcp__github__list_issues,
+      undefined,
+    );
+  });
+
+  it("isolates deferred discovery between run-scoped tool views", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "deferred_tool",
+      description: "deferred",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      shouldDefer: true,
+      execute: async () => "ok",
+    });
+    const first = createTestRunContext(registry);
+    const second = createTestRunContext(registry);
+
+    first.toolView.searchTools("deferred_tool");
+
+    assert.equal(first.toolView.has("deferred_tool"), true);
+    assert.equal(second.toolView.has("deferred_tool"), false);
+    assert.equal(registry.toAISDKFormat(second).deferred_tool, undefined);
+  });
+
+  it("does not let tool_search discover tools outside the run view", async () => {
+    const registry = new ToolRegistry();
+    registry.register(createToolSearchTool(), {
+      name: "deferred_write",
+      description: "write",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: false,
+      shouldDefer: true,
+      execute: async () => "written",
+    });
+    const context = createTestRunContext(registry, {
+      selection: { readOnlyOnly: true },
+    });
+    const search = registry.toAISDKFormat(context).tool_search;
+    assert.ok(search);
+
+    assert.match(
+      String(await search.execute({ query: "deferred_write" })),
+      /没有找到工具/,
+    );
+    assert.equal(context.toolView.has("deferred_write"), false);
+  });
+
+  it("only narrows a parent tool view and cannot restore hidden tools", () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: "read_file",
+        description: "read",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: true,
+        execute: async () => "read",
+      },
+      {
+        name: "write_file",
+        description: "write",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: false,
+        execute: async () => "write",
+      },
+    );
+    const parent = registry.createView({
+      allowedTools: new Set(["read_file"]),
+    });
+    const child = parent.restrict({
+      allowedTools: new Set(["read_file", "write_file"]),
+    });
+
+    assert.deepEqual(
+      child.getActiveTools().map((tool) => tool.name),
+      ["read_file"],
+    );
+  });
+
+  it("rejects a run context created by a different registry", () => {
+    const first = new ToolRegistry();
+    const second = new ToolRegistry();
+    const context = createTestRunContext(first);
+
+    assert.throws(
+      () => second.toAISDKFormat(context),
+      /toolView 不属于当前 ToolRegistry/,
+    );
+  });
+
+  it("passes the SDK call identity and cancellation signal into tool context", async () => {
+    const registry = new ToolRegistry();
+    let observedCallId: string | undefined;
+    let observedSignal: AbortSignal | undefined;
+    registry.register({
+      name: "inspect_context",
+      description: "inspect",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async (_input, context) => {
+        observedCallId = context?.toolCallId;
+        observedSignal = context?.signal;
+        return "ok";
+      },
+    });
+    const runContext = createTestRunContext(registry);
+    const callController = new AbortController();
+    const tool = registry.toAISDKFormat(runContext).inspect_context;
+    assert.ok(tool);
+
+    await tool.execute(
+      {},
+      { toolCallId: "call-123", abortSignal: callController.signal },
+    );
+
+    assert.equal(observedCallId, "call-123");
+    assert.notEqual(observedSignal, runContext.signal);
+    callController.abort();
+    assert.equal(observedSignal?.aborted, true);
+  });
+
+  it("does not publish a successful result after the caller cancels", async () => {
+    const registry = new ToolRegistry();
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    registry.register({
+      name: "cancellable_read",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async (_input, context) => {
+        started();
+        await new Promise<void>((resolve) =>
+          context?.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          }),
+        );
+        return "late success";
+      },
+    });
+    const controller = new AbortController();
+    const context = createTestRunContext(registry);
+    const tool = registry.toAISDKFormat(context).cancellable_read;
+    assert.ok(tool);
+
+    const result = tool.execute({}, { abortSignal: controller.signal });
+    await startedPromise;
+    controller.abort(new DOMException("cancelled", "AbortError"));
+
+    await assert.rejects(() => result, /cancelled/);
+    assert.equal(registry.getExecutionAuditLog().at(-1)?.outcome, "aborted");
   });
 
   it("moves discovered tool tokens from deferred to active", () => {

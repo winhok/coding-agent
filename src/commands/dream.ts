@@ -26,13 +26,14 @@ export const dreamCommands: CommandHandler[] = [
     ctx.timestamps.set(ctx.messages.length - 1, Date.now());
     ctx.sessionStore.append(userMessage);
 
-    const currentSystem = ctx.builder.build(ctx.makePromptCtx());
+    const runContext = ctx.createRunContext();
+    const currentSystem = ctx.buildSystem(runContext);
     agentLoop({
       model: ctx.model,
       registry: ctx.registry,
       messages: ctx.messages,
       system: currentSystem,
-      workingDir: ctx.workingDir,
+      runContext,
       tracker: ctx.tracker,
       eventSink: terminalAgentEventSink,
     }).then(({ appendedMessages }) => {

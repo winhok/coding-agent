@@ -1,24 +1,30 @@
 import type { LanguageModel, ModelMessage } from "ai";
 import { type AgentEvent, agentLoop } from "../agent/loop.js";
-import type { RequestApproval } from "../security/permissions.js";
-import type { ToolRegistry } from "../tools/registry.js";
+import {
+  type AgentRunContext,
+  deriveAgentRunContext,
+} from "../agent/run-context.js";
+import type { SkillView } from "../skills/loader.js";
+import type { ToolRegistry, ToolView } from "../tools/registry.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
 import type { UsageTracker } from "../usage/tracker.js";
 import { resolveSubAgentProfile } from "./profiles.js";
 import type { SubAgentRegistry } from "./registry.js";
 import type { SpawnRequest, SubAgentProfile } from "./types.js";
 
-export interface SpawnContext {
+export interface SpawnContextBase {
   model: LanguageModel;
   registry: ToolRegistry;
   agentRegistry: SubAgentRegistry;
   profiles: Record<string, SubAgentProfile>;
   currentDepth: number;
   tracker?: UsageTracker;
-  requestApproval?: RequestApproval;
   traceDirectory?: string;
-  workingDir: string;
   projectRules?: string;
+}
+
+export interface SpawnContext extends SpawnContextBase {
+  parentRunContext: AgentRunContext;
 }
 
 const MAX_STEPS = 30;
@@ -40,16 +46,19 @@ function agentTag(index: number, runId: string): string {
 function buildSubAgentSystem(
   profileName: string,
   profile: SubAgentProfile,
-  registry: ToolRegistry,
-  selection: Parameters<ToolRegistry["getActiveTools"]>[0],
+  toolView: ToolView,
+  skillView: SkillView,
   workingDir: string,
   projectRules?: string,
 ): string {
-  const activeTools = registry
-    .getActiveTools(selection)
+  const activeTools = toolView
+    .getActiveTools()
     .map((tool) => tool.name)
     .join(", ");
-  const deferred = registry.getDeferredToolSummary(selection);
+  const deferred = toolView.getDeferredToolSummary();
+  const skills = toolView.hasSkillCatalogTool()
+    ? skillView.buildPromptSection()
+    : null;
   return [
     `你是独立执行单个任务的子 Agent，Profile 为 ${profileName}。`,
     profile.systemPrompt,
@@ -58,6 +67,7 @@ function buildSubAgentSystem(
     projectRules,
     `当前可见工具：${activeTools || "无"}`,
     deferred,
+    skills,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -94,7 +104,24 @@ export async function spawnAgent(
   const timeout =
     request.timeout || ctx.agentRegistry.getConfig().defaultTimeout;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException("子 Agent 执行超时", "TimeoutError"));
+  }, timeout);
+  const signal = AbortSignal.any([
+    ctx.parentRunContext.signal,
+    controller.signal,
+  ]);
+  const childToolView = ctx.parentRunContext.toolView.restrict(
+    resolved.selection,
+  );
+  const childRunContext = deriveAgentRunContext(ctx.parentRunContext, {
+    runId,
+    agentId: runId,
+    signal,
+    toolView: childToolView,
+  });
   let partialText = "";
   let trace: LocalTraceRecorder | undefined;
 
@@ -140,19 +167,16 @@ export async function spawnAgent(
       system: buildSubAgentSystem(
         resolved.name,
         resolved.profile,
-        ctx.registry,
-        resolved.selection,
-        ctx.workingDir,
+        childRunContext.toolView,
+        childRunContext.skillView,
+        childRunContext.workingDir,
         ctx.projectRules,
       ),
-      workingDir: ctx.workingDir,
+      runContext: childRunContext,
       ...(ctx.tracker ? { tracker: ctx.tracker } : {}),
       eventSink,
       ...(trace ? { trace } : {}),
       maxSteps: MAX_STEPS,
-      ...(ctx.requestApproval ? { requestApproval: ctx.requestApproval } : {}),
-      toolSelection: resolved.selection,
-      abortSignal: controller.signal,
       forceFinalStep: true,
     });
     const output = result.text || "(无输出)";
@@ -164,10 +188,11 @@ export async function spawnAgent(
     return output;
   } catch (error) {
     const isAbort =
-      (error instanceof Error && error.name === "AbortError") ||
-      controller.signal.aborted;
+      (error instanceof Error && error.name === "AbortError") || signal.aborted;
     const errorMessage = isAbort
-      ? `执行超时 (${timeout / 1000}s)`
+      ? timedOut
+        ? `执行超时 (${timeout / 1000}s)`
+        : "随父 Agent 运行取消"
       : error instanceof Error
         ? error.message
         : String(error);

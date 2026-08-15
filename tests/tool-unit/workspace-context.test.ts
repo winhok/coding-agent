@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { createAgentRunContext } from "../../src/agent/run-context.ts";
 import { bashTool } from "../../src/tools/bash.tool.ts";
 import { globTool } from "../../src/tools/glob.tool.ts";
 import { readFileTool } from "../../src/tools/read_file.tool.ts";
 import { writeFileTool } from "../../src/tools/write_file.tool.ts";
+import { createTestRunContext } from "../helpers.ts";
 
 const tempDirs: string[] = [];
 
@@ -23,7 +23,7 @@ describe("workspace execution context", () => {
     const result = String(
       await bashTool.execute(
         { command: "pwd" },
-        createAgentRunContext(workspace),
+        createTestRunContext(workspace),
       ),
     );
 
@@ -44,7 +44,7 @@ describe("workspace execution context", () => {
       join(outside, "missing.txt"),
       join(workspace, "dangling-link"),
     );
-    const context = createAgentRunContext(workspace);
+    const context = createTestRunContext(workspace);
 
     assert.match(
       String(await readFileTool.execute({ path: "secret-link" }, context)),
@@ -72,7 +72,7 @@ describe("workspace execution context", () => {
 
   it("blocks glob patterns that traverse outside the workspace", async () => {
     const workspace = await makeTemp("workspace");
-    const context = createAgentRunContext(workspace);
+    const context = createTestRunContext(workspace);
 
     assert.match(
       String(

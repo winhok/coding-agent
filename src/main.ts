@@ -8,9 +8,13 @@ import {
   type AgentLoopResult,
   agentLoop,
 } from "./agent/loop.ts";
+import {
+  type AgentRunContext,
+  createAgentRunContext,
+} from "./agent/run-context.js";
 import { terminalAgentEventSink } from "./agent/terminal-event-sink.js";
 import { SubAgentRegistry } from "./agents/registry.js";
-import type { SpawnContext } from "./agents/spawn.js";
+import type { SpawnContextBase } from "./agents/spawn.js";
 import { FeishuChannel } from "./channels/feishu.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { resolveCliModePolicy } from "./cli/mode-policy.js";
@@ -43,6 +47,7 @@ import {
   deferredTools,
   PromptBuilder,
   type PromptContext,
+  renderPromptSections,
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder.js";
@@ -55,6 +60,7 @@ import { createDashScopeEmbedder } from "./rag/embedder.js";
 import { importDocuments } from "./rag/ingest.js";
 import { SqliteVectorStore } from "./rag/sqlite-store.js";
 import { createRuntimeShutdown } from "./runtime/shutdown.js";
+import { abortReason } from "./security/abort.js";
 import { HookPipeline } from "./security/hooks.js";
 import type {
   ApprovalRequest,
@@ -67,7 +73,11 @@ import { allTools } from "./tools/index.ts";
 import { connectMCPServers } from "./tools/mcp-connect.js";
 import { createMemoryTool } from "./tools/memory-tools.js";
 import { createRagTools } from "./tools/rag-tools.js";
-import { ToolRegistry } from "./tools/registry.js";
+import {
+  ToolRegistry,
+  type ToolSelection,
+  type ToolView,
+} from "./tools/registry.js";
 import { createSkillTool } from "./tools/skill-tool.js";
 import { createSpawnTool } from "./tools/spawn-tools.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
@@ -111,7 +121,7 @@ const model = createModel(config.model, apiKey);
 
 const registry = new ToolRegistry();
 registry.register(...allTools);
-registry.register(createToolSearchTool(registry));
+registry.register(createToolSearchTool());
 
 const memoryStore = new MemoryStore(config.memory.dataDir);
 memoryStore.init();
@@ -315,9 +325,13 @@ export async function startAgent(
     );
     return decision;
   };
+  const runtimeController = new AbortController();
 
   function promptForApproval(request: ApprovalRequest): Promise<boolean> {
     if (!rl) return Promise.resolve(false);
+    if (request.signal?.aborted) {
+      return Promise.reject(abortReason(request.signal));
+    }
     const input = request.input as Record<string, unknown> | null;
     const target =
       request.tool === "bash"
@@ -331,23 +345,73 @@ export async function startAgent(
 
     console.log(`\n  [权限确认] ${request.tool}: ${target}`);
     console.log(`  原因: ${request.reason}`);
-    return new Promise((resolve) => {
-      rl.question("  允许执行? (y/N) ", (answer) => {
-        resolve(answer.trim().toLowerCase().startsWith("y"));
-      });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const signal = request.signal;
+      const cleanup = () => signal?.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        if (settled || !signal) return;
+        settled = true;
+        cleanup();
+        reject(abortReason(signal));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      const answer = (value: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value.trim().toLowerCase().startsWith("y"));
+      };
+
+      if (signal) {
+        rl.question("  允许执行? (y/N) ", { signal }, answer);
+      } else {
+        rl.question("  允许执行? (y/N) ", answer);
+      }
     });
   }
 
-  function makePromptCtx(): PromptContext {
+  function makePromptCtx(toolView?: ToolView): PromptContext {
     return {
-      toolCount: registry.getActiveTools().length,
-      deferredToolSummary: registry.getDeferredToolSummary(),
+      toolCount: toolView
+        ? toolView.getActiveTools().length
+        : registry.getActiveTools().length,
+      deferredToolSummary: toolView
+        ? toolView.getDeferredToolSummary()
+        : registry.getDeferredToolSummary(),
       sessionMessageCount: messages.length,
       sessionId: config.session.id,
     };
   }
 
-  function getSpawnContext(): SpawnContext {
+  function createRunContext(
+    selection?: ToolSelection,
+    signal: AbortSignal = runtimeController.signal,
+  ): AgentRunContext {
+    return createAgentRunContext(workingDir, {
+      agentId: "root",
+      signal,
+      toolView: registry.createView(selection),
+      skillView: skillLoader.createView(),
+      requestApproval,
+    });
+  }
+
+  function buildSystemFor(runContext: AgentRunContext): string {
+    const sections = builder
+      .buildSections(makePromptCtx(runContext.toolView))
+      .flatMap((section) => {
+        if (section.name !== "skillContext") return [section];
+        const skillCatalog = runContext.toolView.hasSkillCatalogTool()
+          ? runContext.skillView.buildPromptSection()
+          : null;
+        return skillCatalog ? [{ ...section, text: skillCatalog }] : [];
+      });
+    return renderPromptSections(sections);
+  }
+
+  function getSpawnContext(): SpawnContextBase {
     return {
       model,
       registry,
@@ -355,8 +419,6 @@ export async function startAgent(
       profiles: config.agents.profiles,
       currentDepth: 0,
       tracker,
-      requestApproval,
-      workingDir,
       ...(projectRules ? { projectRules } : {}),
     };
   }
@@ -367,8 +429,8 @@ export async function startAgent(
   const gateway = new ChannelGateway({
     model,
     registry,
-    buildSystem: () => builder.build(makePromptCtx()),
-    workingDir,
+    createRunContext,
+    buildSystem: buildSystemFor,
   });
 
   if (config.channels.feishu.enabled) {
@@ -393,7 +455,6 @@ export async function startAgent(
     ...createAgentCommands(agentRegistry),
   ]);
 
-  const runtimeController = new AbortController();
   let resolveInteractive: (() => void) | undefined;
 
   const handleInterrupt = () => {
@@ -451,13 +512,14 @@ export async function startAgent(
         const cronMessages: ModelMessage[] = [
           { role: "user", content: prompt },
         ];
-        const system = builder.build(makePromptCtx());
+        const runContext = createRunContext();
+        const system = buildSystemFor(runContext);
         await agentLoop({
           model,
           registry,
           messages: cronMessages,
           system,
-          workingDir,
+          runContext,
           eventSink: terminalAgentEventSink,
         });
         const lastMessage = cronMessages[cronMessages.length - 1];
@@ -556,9 +618,15 @@ export async function startAgent(
     replaceMessages(turnDefense.messages);
     await compactIfNeeded();
 
-    const modePolicy = resolveCliModePolicy(
+    const initialPolicy = resolveCliModePolicy(
       options.mode,
       builder.build(makePromptCtx()),
+      options.approvalMode,
+    );
+    const runContext = createRunContext(initialPolicy.toolSelection);
+    const modePolicy = resolveCliModePolicy(
+      options.mode,
+      buildSystemFor(runContext),
       options.approvalMode,
     );
     const trace = await LocalTraceRecorder.start({
@@ -575,7 +643,7 @@ export async function startAgent(
         registry,
         messages,
         system: modePolicy.system,
-        workingDir,
+        runContext,
         tracker,
         onStepUsage: async (usage, responseMessages, needsFollowUp) => {
           const promptTokens = promptTokensFromUsage(usage);
@@ -590,11 +658,6 @@ export async function startAgent(
         },
         ...(eventSink ? { eventSink } : {}),
         trace,
-        requestApproval,
-        ...(modePolicy.toolSelection
-          ? { toolSelection: modePolicy.toolSelection }
-          : {}),
-        abortSignal: runtimeController.signal,
       });
       await trace.finish("completed");
       console.log(`  [Trace] ${trace.filePath}`);
@@ -670,6 +733,8 @@ export async function startAgent(
         sessionStore: store,
         model,
         makePromptCtx,
+        createRunContext,
+        buildSystem: buildSystemFor,
         ask,
         runUserTurn,
         replaceMessages,

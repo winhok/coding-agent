@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { createAgentRunContext } from "../../src/agent/run-context.ts";
 import { bashTool } from "../../src/tools/bash.tool.ts";
 import { createTodosTool } from "../../src/tools/create_todos.tool.ts";
 import { editFileTool } from "../../src/tools/edit_file.tool.ts";
@@ -16,7 +15,11 @@ import { listDirectoryTool } from "../../src/tools/list_directory.tool.ts";
 import { readFileTool } from "../../src/tools/read_file.tool.ts";
 import { updateTodoTool } from "../../src/tools/update_todo.tool.ts";
 import { writeFileTool } from "../../src/tools/write_file.tool.ts";
-import { cleanupTempDir, makeTempDir } from "../helpers.ts";
+import {
+  cleanupTempDir,
+  createTestRunContext,
+  makeTempDir,
+} from "../helpers.ts";
 
 describe("tool-unit tools", () => {
   it("registers every implemented tool", () => {
@@ -42,7 +45,7 @@ describe("tool-unit tools", () => {
   });
 
   it("creates and replaces an in-memory todo plan", async () => {
-    const context = createAgentRunContext(process.cwd());
+    const context = createTestRunContext(process.cwd());
 
     const createResult = String(
       await createTodosTool.execute(
@@ -65,7 +68,7 @@ describe("tool-unit tools", () => {
   });
 
   it("updates todo status and rejects invalid updates", async () => {
-    const context = createAgentRunContext(process.cwd());
+    const context = createTestRunContext(process.cwd());
     await createTodosTool.execute(
       { todos: ["Write tests", "Implement tools"] },
       context,
@@ -118,7 +121,7 @@ describe("tool-unit tools", () => {
       const listResult = String(
         await listDirectoryTool.execute(
           { path: "." },
-          createAgentRunContext(dir),
+          createTestRunContext(dir),
         ),
       );
       assert.match(listResult, /note\.txt/);
@@ -346,7 +349,7 @@ describe("tool-unit tools", () => {
       const globResult = String(
         await globTool.execute(
           { pattern: "**/*.ts", path: "." },
-          createAgentRunContext(dir),
+          createTestRunContext(dir),
         ),
       );
       assert.match(globResult, /src\/main\.ts/);
@@ -355,7 +358,7 @@ describe("tool-unit tools", () => {
       const grepResult = String(
         await grepTool.execute(
           { pattern: "marker", path: "." },
-          createAgentRunContext(dir),
+          createTestRunContext(dir),
         ),
       );
       assert.match(grepResult, /src\/main\.ts:1/);
@@ -385,7 +388,7 @@ describe("tool-unit tools", () => {
       const grepResult = String(
         await grepTool.execute(
           { pattern: "needle", path: ".", maxResults: 2 },
-          createAgentRunContext(dir),
+          createTestRunContext(dir),
         ),
       );
 
@@ -408,7 +411,7 @@ describe("tool-unit tools", () => {
       const globResult = String(
         await globTool.execute(
           { pattern: "src/*.ts", path: ".", maxResults: 2 },
-          createAgentRunContext(dir),
+          createTestRunContext(dir),
         ),
       );
 

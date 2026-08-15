@@ -1,6 +1,6 @@
-import type { ToolDefinition, ToolRegistry } from "./registry.js";
+import type { ToolDefinition } from "./registry.js";
 
-export function createToolSearchTool(registry: ToolRegistry): ToolDefinition {
+export function createToolSearchTool(): ToolDefinition {
   return {
     name: "tool_search",
     description:
@@ -19,8 +19,8 @@ export function createToolSearchTool(registry: ToolRegistry): ToolDefinition {
     },
     isConcurrencySafe: true,
     isReadOnly: true,
-    execute: async ({ query }: { query: string }) => {
-      const results = registry.searchTools(query);
+    execute: async ({ query }: { query: string }, context) => {
+      const results = context?.toolView.searchTools(query) ?? [];
       if (results.length === 0) return `没有找到工具: ${query}`;
       return results.map((t) => ({
         name: t.name,

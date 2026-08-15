@@ -5,9 +5,15 @@ import { describe, it } from "node:test";
 import type { ModelMessage } from "ai";
 import type { CommandContext } from "../src/commands/index.ts";
 import { createSkillCommands } from "../src/commands/skill.ts";
-import { SkillLoader } from "../src/skills/loader.ts";
+import { SkillLoader, SkillView } from "../src/skills/loader.ts";
+import { ToolRegistry } from "../src/tools/registry.ts";
 import { createSkillTool } from "../src/tools/skill-tool.ts";
-import { cleanupTempDir, makeTempDir, withMutedConsole } from "./helpers.ts";
+import {
+  cleanupTempDir,
+  createTestRunContext,
+  makeTempDir,
+  withMutedConsole,
+} from "./helpers.ts";
 
 function writeSkill(
   baseDir: string,
@@ -159,6 +165,39 @@ describe("skill tool", () => {
         new RegExp(`${skill.dirPath}/checklist\\.md`),
       );
       assert.match(String(result), /用户指令: 检查 src\/rag/);
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("loads only skills present in the calling run's SkillView", async () => {
+    const dir = makeTempDir("coding-agent-skills-");
+    try {
+      writeSkill(dir, "code-review", "审查代码");
+      writeSkill(dir, "research", "技术调研");
+      const loader = new SkillLoader(dir);
+      loader.load();
+      const research = loader.get("research");
+      assert.ok(research);
+      const registry = new ToolRegistry();
+      const tool = createSkillTool(loader);
+      registry.register(tool);
+      const context = createTestRunContext(registry, {
+        skillView: new SkillView([research]),
+      });
+      const formatted = registry.toAISDKFormat(context).skill;
+      assert.ok(formatted);
+
+      assert.match(
+        String(await formatted.execute({ name: "code-review" })),
+        /参数校验失败/,
+      );
+      assert.match(
+        String(await formatted.execute({ name: "research" })),
+        /已加载 Skill: research/,
+      );
+      assert.match(JSON.stringify(formatted.inputSchema), /research/);
+      assert.doesNotMatch(JSON.stringify(formatted.inputSchema), /code-review/);
     } finally {
       cleanupTempDir(dir);
     }

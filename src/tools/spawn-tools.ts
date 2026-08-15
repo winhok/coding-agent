@@ -1,12 +1,12 @@
 import type { SubAgentRegistry } from "../agents/registry.js";
-import type { SpawnContext } from "../agents/spawn.js";
+import type { SpawnContextBase } from "../agents/spawn.js";
 import { spawnAgent, spawnParallel } from "../agents/spawn.js";
 import type { ToolExecutionContext } from "./execution-pipeline.js";
 import type { ToolDefinition } from "./registry.js";
 
 export function createSpawnTool(
   _agentRegistry: SubAgentRegistry,
-  getSpawnContext: () => SpawnContext,
+  getSpawnContext: () => SpawnContextBase,
 ): ToolDefinition {
   return {
     name: "spawn_agent",
@@ -52,12 +52,13 @@ export function createSpawnTool(
       executionContext?: ToolExecutionContext,
     ) => {
       const baseContext = getSpawnContext();
-      const context: SpawnContext = {
+      if (!executionContext) {
+        return "[spawn] 拒绝: 缺少父 Agent 运行上下文";
+      }
+      const context = {
         ...baseContext,
-        workingDir: executionContext?.workingDir ?? baseContext.workingDir,
-        ...(executionContext?.requestApproval
-          ? { requestApproval: executionContext.requestApproval }
-          : {}),
+        currentDepth: executionContext.depth,
+        parentRunContext: executionContext,
       };
 
       if (input.tasks && input.tasks.length > 0) {

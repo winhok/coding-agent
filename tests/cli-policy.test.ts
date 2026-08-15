@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { resolveCliModePolicy } from "../src/cli/mode-policy.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
+import { createTestRunContext } from "./helpers.ts";
 
 describe("CLI mode policy", () => {
   it("enforces plan mode as read-only without delegation", () => {
@@ -46,7 +47,11 @@ describe("CLI mode policy", () => {
     );
 
     const policy = resolveCliModePolicy("plan", "base");
-    const tools = registry.toAISDKFormat(undefined, policy.toolSelection);
+    const tools = registry.toAISDKFormat(
+      createTestRunContext(registry, {
+        ...(policy.toolSelection ? { selection: policy.toolSelection } : {}),
+      }),
+    );
 
     assert.deepEqual(Object.keys(tools), ["read_file"]);
     assert.match(policy.system, /不得修改文件/);

@@ -142,10 +142,15 @@ export class MCPClient {
     return tools;
   }
 
-  async callTool(name: string, args: Record<string, unknown>) {
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
     const result = (await this.client.callTool(
       { name, arguments: args },
       CallToolResultSchema,
+      signal ? { signal } : undefined,
     )) as CallToolResult;
     const texts = (result.content ?? []).flatMap((content) =>
       content.type === "text" && content.text ? [content.text] : [],

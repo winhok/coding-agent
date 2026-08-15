@@ -5,6 +5,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { type AgentEvent, agentLoop } from "../../src/agent/loop.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
 import { createToolSearchTool } from "../../src/tools/tool-search.ts";
+import { createTestRunContext } from "../helpers.ts";
 
 const TEST_USAGE = {
   inputTokens: {
@@ -57,7 +58,7 @@ describe("agent loop interface", () => {
       registry,
       messages: [{ role: "user", content: "echo twice" }],
       system: "test",
-      workingDir: process.cwd(),
+      runContext: createTestRunContext(registry),
     });
 
     assert.equal(result.text, "两个工具都已完成");
@@ -99,14 +100,14 @@ describe("agent loop interface", () => {
       shouldDefer: true,
       execute: async () => "deferred result",
     });
-    registry.register(createToolSearchTool(registry));
+    registry.register(createToolSearchTool());
 
     const result = await agentLoop({
       model,
       registry,
       messages: [{ role: "user", content: "discover" }],
       system: "test",
-      workingDir: process.cwd(),
+      runContext: createTestRunContext(registry),
     });
 
     assert.equal(result.text, "deferred complete");
@@ -144,8 +145,9 @@ describe("agent loop interface", () => {
       registry,
       messages: [{ role: "user", content: "mutate" }],
       system: "test",
-      workingDir: process.cwd(),
-      requestApproval: async () => false,
+      runContext: createTestRunContext(registry, {
+        requestApproval: async () => false,
+      }),
     });
 
     assert.equal(executed, false);
@@ -174,12 +176,13 @@ describe("agent loop interface", () => {
     });
     const messages = [{ role: "user" as const, content: "测试" }];
 
+    const registry = new ToolRegistry();
     const result = await agentLoop({
       model,
-      registry: new ToolRegistry(),
+      registry,
       messages,
       system: "test",
-      workingDir: process.cwd(),
+      runContext: createTestRunContext(registry),
       eventSink: (event) => {
         events.push(event);
       },
@@ -219,12 +222,13 @@ describe("agent loop interface", () => {
       },
     });
 
+    const registry = new ToolRegistry();
     const result = await agentLoop({
       model,
-      registry: new ToolRegistry(),
+      registry,
       messages: [{ role: "user", content: "测试" }],
       system: "test",
-      workingDir: process.cwd(),
+      runContext: createTestRunContext(registry),
       maxSteps: 0,
       eventSink: (event) => {
         events.push(event);

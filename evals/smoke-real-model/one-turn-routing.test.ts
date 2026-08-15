@@ -6,6 +6,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { stepCountIs, ToolLoopAgent } from "ai";
 import { allTools } from "../../src/tools/index.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
+import { createTestRunContext } from "../../tests/helpers.ts";
 
 const runRealModelEvals = process.env.RUN_REAL_MODEL_EVALS === "1";
 
@@ -28,7 +29,7 @@ async function generateToolCall(prompt: string) {
   const agent = new ToolLoopAgent({
     model: createDashScopeModel(),
     stopWhen: stepCountIs(1),
-    tools: registry.toAISDKFormat(),
+    tools: registry.toAISDKFormat(createTestRunContext(registry)),
   });
 
   return agent.generate({ prompt });

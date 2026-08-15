@@ -7,8 +7,14 @@ import { resolveSubAgentProfile } from "../../src/agents/profiles.ts";
 import { SubAgentRegistry } from "../../src/agents/registry.ts";
 import { spawnAgent } from "../../src/agents/spawn.ts";
 import type { SubAgentProfile } from "../../src/agents/types.ts";
+import { SkillView } from "../../src/skills/loader.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
-import { cleanupTempDir, makeTempDir, withMutedConsole } from "../helpers.ts";
+import {
+  cleanupTempDir,
+  createTestRunContext,
+  makeTempDir,
+  withMutedConsole,
+} from "../helpers.ts";
 
 const profiles: Record<string, SubAgentProfile> = {
   general: {
@@ -121,6 +127,26 @@ describe("tool-unit sub-agent", () => {
       },
     });
     const agentRegistry = new SubAgentRegistry();
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "skill",
+      exposesSkillCatalog: true,
+      description: "load skill",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => "loaded",
+    });
+    const skillView = new SkillView([
+      {
+        name: "research",
+        description: "evidence-led research",
+        whenToUse: "source verification",
+        disableModelInvocation: false,
+        userInvocable: true,
+        content: "research instructions",
+        dirPath: "/skills/research",
+      },
+    ]);
 
     try {
       const output = await withMutedConsole(() =>
@@ -128,11 +154,11 @@ describe("tool-unit sub-agent", () => {
           { task: "检查实现", profile: "explorer" },
           {
             model,
-            registry: new ToolRegistry(),
+            registry,
             agentRegistry,
             profiles,
             currentDepth: 0,
-            workingDir: process.cwd(),
+            parentRunContext: createTestRunContext(registry, { skillView }),
             traceDirectory,
           },
         ),
@@ -141,12 +167,54 @@ describe("tool-unit sub-agent", () => {
       assert.equal(output, "已完成");
       assert.match(capturedPrompt, /Profile 为 explorer/);
       assert.match(capturedPrompt, /检查实现/);
+      assert.match(capturedPrompt, /research — evidence-led research/);
       assert.doesNotMatch(capturedPrompt, /主 Agent 的对话历史内容/);
       const run = agentRegistry.getAllRuns()[0];
       assert.equal(run?.profile, "explorer");
       assert.equal(run?.stats?.steps, 1);
       assert.equal(run?.stats?.toolCalls, 0);
       assert.ok(run?.tracePath && fs.existsSync(run.tracePath));
+
+      capturedPrompt = "";
+      await withMutedConsole(() =>
+        spawnAgent(
+          { task: "只用自定义工具", profile: "custom" },
+          {
+            model,
+            registry,
+            agentRegistry,
+            profiles,
+            currentDepth: 0,
+            parentRunContext: createTestRunContext(registry, { skillView }),
+            traceDirectory,
+          },
+        ),
+      );
+      assert.doesNotMatch(capturedPrompt, /research — evidence-led research/);
+
+      registry.register({
+        name: "skill",
+        description: "same-name shadow",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: true,
+        execute: async () => "shadowed",
+      });
+      capturedPrompt = "";
+      await withMutedConsole(() =>
+        spawnAgent(
+          { task: "检查同名工具", profile: "explorer" },
+          {
+            model,
+            registry,
+            agentRegistry,
+            profiles,
+            currentDepth: 0,
+            parentRunContext: createTestRunContext(registry, { skillView }),
+            traceDirectory,
+          },
+        ),
+      );
+      assert.doesNotMatch(capturedPrompt, /research — evidence-led research/);
     } finally {
       cleanupTempDir(traceDirectory);
     }

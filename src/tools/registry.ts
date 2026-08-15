@@ -1,6 +1,6 @@
 import { jsonSchema } from "ai";
 import type { JSONSchema7 } from "json-schema";
-import { createAgentRunContext } from "../agent/run-context.js";
+import type { AgentRunContext } from "../agent/run-context.js";
 import type { HookPipeline } from "../security/hooks.js";
 import {
   canUseTool,
@@ -21,6 +21,8 @@ import {
 
 export interface ToolDefinition extends ExecutableTool {
   description: string;
+  parametersForContext?: (context: AgentRunContext) => Record<string, unknown>;
+  exposesSkillCatalog?: boolean;
   shouldDefer?: boolean; // 是否延迟加载
   searchHint?: string; // 搜索提示词，帮助 ToolSearch 匹配
 }
@@ -32,12 +34,6 @@ export interface ToolSelection {
   readOnlyOnly?: boolean;
 }
 
-export interface ToolExecutionOptions {
-  workingDir?: string;
-  todoManager?: ToolExecutionContext["todoManager"];
-  requestApproval?: ToolExecutionContext["requestApproval"];
-}
-
 interface MCPTool {
   name: string;
   description: string;
@@ -47,7 +43,11 @@ interface MCPTool {
 export interface MCPToolClient {
   connect(): Promise<void>;
   listTools(): Promise<MCPTool[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<string>;
+  callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -96,8 +96,8 @@ export class ToolRegistry {
           maxResultChars: DEFAULT_MAX_RESULT_CHARS,
           shouldDefer: true,
           searchHint: `${serverName} ${tool.name} ${tool.description}`,
-          execute: async (input) => {
-            return toolClient.callTool(originalName, input);
+          execute: async (input, context) => {
+            return toolClient.callTool(originalName, input, context?.signal);
           },
         });
 
@@ -163,6 +163,14 @@ export class ToolRegistry {
 
   getExecutionAuditLog(): readonly ToolExecutionAuditEntry[] {
     return this.executionPipeline.getAuditLog();
+  }
+
+  createView(selection?: ToolSelection): ToolView {
+    return new ToolView(this, selection, new Set());
+  }
+
+  canUseCurrentRole(tool: ToolDefinition): boolean {
+    return canUseTool(this.currentRole, tool, this.rolePolicies);
   }
 
   getActiveTools(selection?: ToolSelection): ToolDefinition[] {
@@ -248,62 +256,65 @@ export class ToolRegistry {
     return { active, deferred, total: active + deferred };
   }
 
-  private formatTools(
-    executionOptions?: ToolExecutionOptions,
-    selection?: ToolSelection,
-  ) {
-    const activeTools = this.getActiveTools(selection);
-    const executionContext = normalizeExecutionContext(executionOptions);
+  formatToolsForView(view: ToolView, executionContext: AgentRunContext) {
+    const activeTools = view.getActiveTools();
 
     return Object.fromEntries(
       activeTools.map((tool) => {
         const hookPipeline = this.hookPipeline;
+        const parameters =
+          tool.parametersForContext?.(executionContext) ?? tool.parameters;
+        const scopedTool: ToolDefinition = { ...tool, parameters };
 
         return [
           tool.name,
           {
             description: tool.description,
-            inputSchema: jsonSchema(tool.parameters as JSONSchema7),
-            execute: (input: unknown) =>
-              this.executionPipeline.execute(
-                tool,
+            inputSchema: jsonSchema(parameters as JSONSchema7),
+            execute: (
+              input: unknown,
+              options?: { toolCallId?: string; abortSignal?: AbortSignal },
+            ) => {
+              const callContext: ToolExecutionContext = {
+                ...executionContext,
+                signal: fuseAbortSignals(
+                  executionContext.signal,
+                  options?.abortSignal,
+                ),
+                toolName: tool.name,
+                ...(options?.toolCallId
+                  ? { toolCallId: options.toolCallId }
+                  : {}),
+              };
+              return this.executionPipeline.execute(
+                scopedTool,
                 input as Record<string, unknown>,
                 {
                   useLocks: tool.holdsExecutionLock !== false,
                   hookPipeline,
                   authorize: (toolName) => {
                     const currentTool = this.tools.get(toolName);
-                    return (
-                      currentTool !== undefined &&
-                      canUseTool(
-                        this.currentRole,
-                        currentTool,
-                        this.rolePolicies,
-                      ) &&
-                      this.matchesSelection(currentTool, selection)
-                    );
+                    return currentTool === tool && view.canExecute(toolName);
                   },
-                  requestApproval: executionContext?.requestApproval,
-                  executionContext,
+                  requestApproval: callContext.requestApproval,
+                  executionContext: callContext,
                 },
-              ),
+              );
+            },
           },
         ] as const;
       }),
     );
   }
 
-  toAISDKFormat(
-    executionContext?: ToolExecutionOptions,
-    selection?: ToolSelection,
-  ) {
-    return this.formatTools(executionContext, selection);
+  toAISDKFormat(executionContext: AgentRunContext) {
+    if (!executionContext.toolView.isOwnedBy(this)) {
+      throw new Error("AgentRunContext.toolView 不属于当前 ToolRegistry");
+    }
+    return executionContext.toolView.toAISDKFormat(executionContext);
   }
 
-  private matchesSelection(
-    tool: ToolDefinition,
-    selection?: ToolSelection,
-  ): boolean {
+  matchesSelection(tool: ToolDefinition, selection?: ToolSelection): boolean {
     if (!selection) return true;
     if (selection.allowedTools && !selection.allowedTools.has(tool.name)) {
       return false;
@@ -331,21 +342,193 @@ export class ToolRegistry {
   }
 }
 
+export class ToolView {
+  constructor(
+    private readonly registry: ToolRegistry,
+    private readonly selection: ToolSelection | undefined,
+    private readonly discoveredTools: Set<string>,
+  ) {}
+
+  restrict(selection?: ToolSelection): ToolView {
+    if (!selection) return this;
+    const narrowed = intersectToolSelections(this.selection, selection);
+    const discovered = new Set(
+      [...this.discoveredTools].filter((name) => {
+        const tool = this.registry.get(name);
+        return tool !== undefined && this.isVisible(tool, narrowed);
+      }),
+    );
+    return new ToolView(this.registry, narrowed, discovered);
+  }
+
+  getActiveTools(): ToolDefinition[] {
+    return this.registry.getAll().filter((tool) => {
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name))
+        return false;
+      return this.isVisible(tool, this.selection);
+    });
+  }
+
+  getDeferredToolSummary(): string {
+    const deferred = this.registry
+      .getAll()
+      .filter(
+        (tool) =>
+          tool.shouldDefer === true &&
+          !this.discoveredTools.has(tool.name) &&
+          this.isVisible(tool, this.selection),
+      );
+    if (deferred.length === 0) return "";
+    const lines = deferred.map((tool) => {
+      const hint = tool.searchHint ? ` — ${tool.searchHint}` : "";
+      return `  - ${tool.name}${hint}`;
+    });
+    return `\n以下工具可用，但需要先通过 tool_search 搜索获取完整定义：\n${lines.join("\n")}`;
+  }
+
+  searchTools(query: string): ToolDefinition[] {
+    const names = splitToolQuery(query);
+    const results: ToolDefinition[] = [];
+    for (const name of names) {
+      const tool = this.registry.get(name);
+      if (
+        tool &&
+        tool.name !== "tool_search" &&
+        this.isVisible(tool, this.selection)
+      ) {
+        results.push(tool);
+        this.discoveredTools.add(tool.name);
+      }
+    }
+    return results;
+  }
+
+  canExecute(name: string): boolean {
+    const tool = this.registry.get(name);
+    return (
+      tool !== undefined &&
+      (!tool.shouldDefer || this.discoveredTools.has(name)) &&
+      this.isVisible(tool, this.selection)
+    );
+  }
+
+  has(name: string): boolean {
+    return this.canExecute(name);
+  }
+
+  hasSkillCatalogTool(): boolean {
+    const tool = this.registry.get("skill");
+    return tool?.exposesSkillCatalog === true && this.canExecute(tool.name);
+  }
+
+  isOwnedBy(registry: ToolRegistry): boolean {
+    return this.registry === registry;
+  }
+
+  countTokenEstimate(): { active: number; deferred: number; total: number } {
+    let active = 0;
+    let deferred = 0;
+    for (const tool of this.registry.getAll()) {
+      if (!this.isVisible(tool, this.selection)) continue;
+      const tokens = Math.ceil(
+        JSON.stringify({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        }).length / 4,
+      );
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
+        deferred += tokens;
+      } else {
+        active += tokens;
+      }
+    }
+    return { active, deferred, total: active + deferred };
+  }
+
+  toAISDKFormat(executionContext: AgentRunContext) {
+    if (executionContext.toolView !== this) {
+      throw new Error("AgentRunContext.toolView 与执行 ToolView 不一致");
+    }
+    return this.registry.formatToolsForView(this, executionContext);
+  }
+
+  private isVisible(
+    tool: ToolDefinition,
+    selection: ToolSelection | undefined,
+  ): boolean {
+    return (
+      this.registry.canUseCurrentRole(tool) &&
+      this.registry.matchesSelection(tool, selection)
+    );
+  }
+}
+
+export function intersectToolSelections(
+  parent: ToolSelection | undefined,
+  child: ToolSelection | undefined,
+): ToolSelection | undefined {
+  if (!parent) return child;
+  if (!child) return parent;
+  const allowedCapabilities = intersectOptionalSets(
+    parent.allowedCapabilities,
+    child.allowedCapabilities,
+  );
+  const allowedTools = intersectOptionalSets(
+    parent.allowedTools,
+    child.allowedTools,
+  );
+  const deniedCapabilities = unionOptionalSets(
+    parent.deniedCapabilities,
+    child.deniedCapabilities,
+  );
+  return {
+    ...(allowedCapabilities ? { allowedCapabilities } : {}),
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(deniedCapabilities ? { deniedCapabilities } : {}),
+    ...(parent.readOnlyOnly || child.readOnlyOnly
+      ? { readOnlyOnly: true }
+      : {}),
+  };
+}
+
 export function toolCapabilities(tool: ToolDefinition): ToolCapability[] {
   return inferToolCapabilities(tool);
 }
 
 export { truncateResult };
 
-function normalizeExecutionContext(
-  options?: ToolExecutionOptions,
-): ToolExecutionContext {
-  const fallback = createAgentRunContext(options?.workingDir ?? process.cwd());
-  return {
-    workingDir: fallback.workingDir,
-    todoManager: options?.todoManager ?? fallback.todoManager,
-    ...(options?.requestApproval
-      ? { requestApproval: options.requestApproval }
-      : {}),
-  };
+function splitToolQuery(query: string): string[] {
+  const trimmed = query.trim();
+  return trimmed.includes(",")
+    ? trimmed
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean)
+    : [trimmed];
+}
+
+function intersectOptionalSets<T>(
+  left: ReadonlySet<T> | undefined,
+  right: ReadonlySet<T> | undefined,
+): ReadonlySet<T> | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return new Set([...left].filter((value) => right.has(value)));
+}
+
+function unionOptionalSets<T>(
+  left: ReadonlySet<T> | undefined,
+  right: ReadonlySet<T> | undefined,
+): ReadonlySet<T> | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return new Set([...left, ...right]);
+}
+
+function fuseAbortSignals(
+  primary: AbortSignal,
+  secondary?: AbortSignal,
+): AbortSignal {
+  return secondary ? AbortSignal.any([primary, secondary]) : primary;
 }

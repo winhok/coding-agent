@@ -1,5 +1,6 @@
 import type { LanguageModel, ModelMessage } from "ai";
 import { agentLoop } from "../agent/loop.js";
+import type { AgentRunContext } from "../agent/run-context.js";
 import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type {
@@ -11,8 +12,8 @@ import type {
 interface GatewayOptions {
   model: LanguageModel;
   registry: ToolRegistry;
-  buildSystem: () => string;
-  workingDir: string;
+  createRunContext: () => AgentRunContext;
+  buildSystem: (runContext: AgentRunContext) => string;
 }
 
 export class ChannelGateway {
@@ -66,13 +67,14 @@ export class ChannelGateway {
     const userMsg: ModelMessage = { role: "user", content: msg.text };
     messages.push(userMsg);
 
-    const system = this.options.buildSystem();
+    const runContext = this.options.createRunContext();
+    const system = this.options.buildSystem(runContext);
     await agentLoop({
       model: this.options.model,
       registry: this.options.registry,
       messages,
       system,
-      workingDir: this.options.workingDir,
+      runContext,
       eventSink: terminalAgentEventSink,
     });
 
