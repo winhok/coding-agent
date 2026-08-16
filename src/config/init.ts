@@ -39,9 +39,17 @@ export async function runInit(): Promise<void> {
     (await ask("\n  启用飞书 Channel? (y/N): ")).toLowerCase() === "y";
   let feishuAppId = "";
   let feishuAppSecret = "";
+  let feishuAllowedSenders: string[] = [];
   if (enableFeishu) {
     feishuAppId = await ask("  飞书 App ID: ");
     feishuAppSecret = await ask("  飞书 App Secret: ");
+    feishuAllowedSenders = parseAllowedSenders(
+      await ask("  允许使用 Agent 的飞书用户 open_id（多个用逗号分隔）: "),
+    );
+    if (feishuAllowedSenders.length === 0) {
+      rl.close();
+      throw new Error("启用飞书 Channel 必须配置至少一个允许的用户 open_id");
+    }
   }
 
   const concurrentStr = await ask("\n  子 Agent 最大并发数 [3]: ");
@@ -58,10 +66,12 @@ export async function runInit(): Promise<void> {
     plugins: [],
     mcp: { servers: [] },
     channels: {
+      dataDir: ".sessions/channels",
       feishu: {
         enabled: enableFeishu,
         appId: envReference("FEISHU_APP_ID"),
         appSecret: envReference("FEISHU_APP_SECRET"),
+        allowedSenders: feishuAllowedSenders,
         port: 3000,
       },
     },
@@ -100,4 +110,15 @@ export async function runInit(): Promise<void> {
 
   console.log("\n  启动 Agent: pnpm start\n");
   rl.close();
+}
+
+export function parseAllowedSenders(input: string): string[] {
+  return [
+    ...new Set(
+      input
+        .split(/[\s,，]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
 }

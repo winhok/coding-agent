@@ -103,6 +103,11 @@ const COMPRESS_PROMPT = `你是一个对话压缩系统。你的任务是把 Age
 const CONTEXT_TOKEN_THRESHOLD = 300;
 const KEEP_RECENT_MESSAGES = 6;
 
+export interface SummarizeOptions {
+  thresholdTokens?: number;
+  keepRecentMessages?: number;
+}
+
 export interface CompactionResult {
   messages: ModelMessage[];
   summary: string;
@@ -113,16 +118,19 @@ export async function summarize(
   model: LanguageModel,
   messages: ModelMessage[],
   existingSummary?: string,
+  options: SummarizeOptions = {},
 ): Promise<CompactionResult> {
   const tokenEstimate = estimateTokens(messages);
+  const thresholdTokens = options.thresholdTokens ?? CONTEXT_TOKEN_THRESHOLD;
+  const keepRecentMessages = options.keepRecentMessages ?? KEEP_RECENT_MESSAGES;
   if (
-    tokenEstimate < CONTEXT_TOKEN_THRESHOLD ||
-    messages.length <= KEEP_RECENT_MESSAGES
+    tokenEstimate < thresholdTokens ||
+    messages.length <= keepRecentMessages
   ) {
     return { messages, summary: existingSummary || "", compressedCount: 0 };
   }
 
-  const splitIdx = Math.max(0, messages.length - KEEP_RECENT_MESSAGES);
+  const splitIdx = Math.max(0, messages.length - keepRecentMessages);
 
   let alignedIdx = splitIdx;
   while (alignedIdx > 0 && messages[alignedIdx]?.role !== "user") {

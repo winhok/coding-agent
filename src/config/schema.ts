@@ -64,14 +64,27 @@ const MCPServersSchema = z
 
 export const MCPConfigSchema = z.object({ servers: MCPServersSchema });
 
-export const FeishuChannelConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  appId: z.string().default(""),
-  appSecret: z.string().default(""),
-  port: z.number().default(3000),
-});
+export const FeishuChannelConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    appId: z.string().default(""),
+    appSecret: z.string().default(""),
+    allowedSenders: z.array(z.string().trim().min(1)).default([]),
+    port: z.number().default(3000),
+  })
+  .superRefine((feishu, ctx) => {
+    if (feishu.enabled && feishu.allowedSenders.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["allowedSenders"],
+        message:
+          "Feishu Channel requires at least one allowed sender when enabled",
+      });
+    }
+  });
 
 export const ChannelConfigSchema = z.object({
+  dataDir: z.string().default(".sessions/channels"),
   feishu: FeishuChannelConfigSchema.prefault({}),
 });
 

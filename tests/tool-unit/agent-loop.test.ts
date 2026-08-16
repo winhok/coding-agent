@@ -243,6 +243,37 @@ describe("agent loop interface", () => {
       ["run_started", "run_finished"],
     );
   });
+
+  it("preserves an in-stream provider error instead of retrying NoOutputGeneratedError", async () => {
+    const providerError = Object.assign(
+      new Error("context_length_exceeded: maximum context window"),
+      { code: "context_length_exceeded" },
+    );
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls++;
+        return {
+          stream: simulateReadableStream({
+            chunks: [{ type: "error" as const, error: providerError }],
+          }),
+        };
+      },
+    });
+    const registry = new ToolRegistry();
+
+    await assert.rejects(
+      agentLoop({
+        model,
+        registry,
+        messages: [{ role: "user", content: "oversized prompt" }],
+        system: "test",
+        runContext: createTestRunContext(registry),
+      }),
+      (error) => error === providerError,
+    );
+    assert.equal(modelCalls, 1);
+  });
 });
 
 function toolCallStream(

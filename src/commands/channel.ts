@@ -16,7 +16,13 @@ export function createChannelCommands(
 
       console.log("\n[channels]");
       for (const channel of channels) {
-        console.log(`  ${channel.name} — ${channel.description}`);
+        const status =
+          channel.status.state === "failed"
+            ? `failed: ${channel.status.error}`
+            : channel.status.state;
+        console.log(
+          `  ${channel.name} — ${channel.description} — ${status} — turns pending/failed ${channel.queues.pendingTurns}/${channel.queues.failedTurns}, delivery pending/failed/unknown ${channel.queues.pendingDeliveries}/${channel.queues.failedDeliveries}/${channel.queues.unknownDeliveries}`,
+        );
       }
       console.log("");
       return true;

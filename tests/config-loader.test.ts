@@ -22,6 +22,7 @@ describe("config", () => {
     assert.equal(config.agents.maxConcurrent, 3);
     assert.deepEqual(config.agents.profiles.explorer?.capabilities, ["read"]);
     assert.equal(config.channels.feishu.enabled, false);
+    assert.equal(config.channels.dataDir, ".sessions/channels");
     assert.equal(config.security.defaultRole, "owner");
     assert.deepEqual(config.security.roles.guest.capabilities, [
       "read",
@@ -147,6 +148,21 @@ describe("config", () => {
           },
         }),
       /MCP server name must be unique/,
+    );
+  });
+
+  it("rejects an enabled Feishu channel without trusted senders", () => {
+    assert.throws(
+      () =>
+        SuperAgentConfigSchema.parse({
+          channels: { feishu: { enabled: true, allowedSenders: [] } },
+        }),
+      /requires at least one allowed sender/,
+    );
+    assert.doesNotThrow(() =>
+      SuperAgentConfigSchema.parse({
+        channels: { feishu: { enabled: true, allowedSenders: ["ou_trusted"] } },
+      }),
     );
   });
 

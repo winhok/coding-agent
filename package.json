@@ -14,7 +14,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "pnpm clean && tsc -b tsconfig.build.json --force",
     "typecheck": "tsc -b --force",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
     "test:unit": "node --import tsx --test tests/tool-unit/*.test.ts",
     "eval": "node --import tsx --test evals/**/*.test.ts",
     "eval:smoke": "RUN_REAL_MODEL_EVALS=1 node --import tsx --test evals/smoke-real-model/*.test.ts",

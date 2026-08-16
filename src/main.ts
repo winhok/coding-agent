@@ -1,5 +1,6 @@
 import "dotenv/config";
 import fs from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
@@ -16,7 +17,10 @@ import { terminalAgentEventSink } from "./agent/terminal-event-sink.js";
 import { SubAgentRegistry } from "./agents/registry.js";
 import type { SpawnContextBase } from "./agents/spawn.js";
 import { FeishuChannel } from "./channels/feishu.js";
-import { ChannelGateway } from "./channels/gateway.js";
+import {
+  ChannelGateway,
+  createChannelGatewayForMode,
+} from "./channels/gateway.js";
 import { resolveCliModePolicy } from "./cli/mode-policy.js";
 import type { CliExecutionResult } from "./cli/run.js";
 import { createAgentCommands } from "./commands/agent.js";
@@ -426,18 +430,28 @@ export async function startAgent(
   registry.register(createSpawnTool(agentRegistry, getSpawnContext));
 
   // ── Channel Gateway ───────────────────────
-  const gateway = new ChannelGateway({
-    model,
-    registry,
-    createRunContext,
-    buildSystem: buildSystemFor,
-  });
+  const gateway = createChannelGatewayForMode(
+    options.mode,
+    () =>
+      new ChannelGateway({
+        model,
+        registry,
+        createRunContext,
+        buildSystem: buildSystemFor,
+        contextWindowTokens: MODEL_CONFIG.effectiveContextWindowTokens,
+        autoCompactThresholdTokens: AUTOCOMPACT_THRESHOLD_TOKENS,
+        statePath: config.channels.feishu.enabled
+          ? path.join(config.channels.dataDir, "state.sqlite")
+          : ":memory:",
+      }),
+  );
 
-  if (config.channels.feishu.enabled) {
+  if (gateway && config.channels.feishu.enabled) {
     gateway.register(
       new FeishuChannel({
         appId: config.channels.feishu.appId,
         appSecret: config.channels.feishu.appSecret,
+        allowedSenders: config.channels.feishu.allowedSenders,
       }),
     );
   }
@@ -449,7 +463,7 @@ export async function startAgent(
     ...dreamCommands,
     ...createSkillCommands(skillLoader),
     ...createPluginCommands(pluginManager, availablePlugins),
-    ...createChannelCommands(gateway),
+    ...(gateway ? createChannelCommands(gateway) : []),
     ...createSecurityCommands(registry, hookPipeline),
     ...(cronService ? createCronCommands(cronService) : []),
     ...createAgentCommands(agentRegistry),
@@ -478,7 +492,7 @@ export async function startAgent(
         },
       },
       { name: "cron", close: () => cronService?.stop() },
-      { name: "channels", close: () => gateway.stopAll() },
+      { name: "channels", close: () => gateway?.stopAll() },
       { name: "plugins", close: () => pluginManager.unloadAll() },
       { name: "mcp", close: () => registry.closeAllMCP() },
       { name: "vector store", close: () => vectorStore?.close() },
@@ -496,6 +510,7 @@ export async function startAgent(
   process.once("SIGTERM", handleTermination);
 
   if (options.mode === "interactive") {
+    if (!gateway) throw new Error("Interactive mode requires Channel Gateway");
     console.log("  启动 Channel...");
     try {
       await gateway.startAll();

@@ -37,6 +37,7 @@ export interface AgentLoopOptions {
     responseMessages: ModelMessage[],
     needsFollowUp: boolean,
   ) => void | Promise<void>;
+  onStepCompleted?: (messages: ModelMessage[]) => void | Promise<void>;
   trace?: LocalTraceRecorder;
   eventSink?: AgentEventSink;
   maxSteps?: number;
@@ -59,6 +60,7 @@ export async function agentLoop({
   runContext,
   tracker,
   onStepUsage,
+  onStepCompleted,
   trace,
   eventSink,
   maxSteps = MAX_STEPS,
@@ -82,6 +84,7 @@ export async function agentLoop({
   try {
     while (step < maxSteps) {
       step++;
+      const stepAppendStart = appendedMessages.length;
       const isLastStep = forceFinalStep && step === maxSteps;
       if (isLastStep) {
         const finalInstruction: ModelMessage = {
@@ -103,6 +106,7 @@ export async function agentLoop({
       let stepUsage: LanguageModelUsage | undefined;
 
       for (let attempt = 1; ; attempt++) {
+        let streamError: unknown;
         try {
           const result = streamText({
             model,
@@ -113,7 +117,9 @@ export async function agentLoop({
             maxRetries: 0,
             abortSignal: runContext.signal,
             providerOptions: { openai: { parallelToolCalls: true } },
-            onError: () => {},
+            onError: ({ error }) => {
+              streamError ??= error;
+            },
           });
 
           for await (const part of result.stream) {
@@ -181,16 +187,25 @@ export async function agentLoop({
                   error: part.error,
                 });
                 break;
+
+              case "error":
+                streamError = part.error;
+                break;
             }
           }
+
+          if (streamError !== undefined) throw streamError;
 
           const finalStep = await result.finalStep;
           stepResponse = finalStep.response;
           stepUsage = await result.usage;
           break;
         } catch (error) {
-          await trace?.recordAttemptError(step, attempt, error);
-          if (attempt > maxRetries || !isRetryable(error as Error)) throw error;
+          const effectiveError = streamError ?? error;
+          await trace?.recordAttemptError(step, attempt, effectiveError);
+          if (attempt > maxRetries || !isRetryable(effectiveError)) {
+            throw effectiveError;
+          }
           const delay = calculateDelay(attempt);
           retries++;
           await emit({
@@ -199,7 +214,7 @@ export async function agentLoop({
             attempt,
             maxRetries,
             delayMs: delay,
-            error,
+            error: effectiveError,
           });
           await sleep(delay);
           hasToolCall = false;
@@ -235,6 +250,7 @@ export async function agentLoop({
         outputMessages: responseMessages,
         usage: norm,
       });
+      await onStepCompleted?.(appendedMessages.slice(stepAppendStart));
       const stepRecord = tracker?.record(modelId, norm);
       await onStepUsage?.(norm, responseMessages, hasToolCall);
 
