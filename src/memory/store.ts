@@ -181,13 +181,15 @@ export class MemoryStore {
     return lintAll(this.list(), this.baseDir);
   }
 
-  buildPromptSection(): string {
+  buildPromptSection(memoryToolAvailable = true): string {
     this.init();
     const index = this.loadIndex();
     const entries = this.list();
 
     if (entries.length === 0) {
-      return "[记忆系统] 当前没有存储任何记忆。你可以使用 memory 工具来保存重要信息。";
+      return memoryToolAvailable
+        ? "[记忆系统] 当前没有存储任何记忆。你可以使用 memory 工具来保存重要信息。"
+        : "[记忆系统] 当前没有存储任何记忆。";
     }
 
     const lines = [
@@ -196,7 +198,9 @@ export class MemoryStore {
       "记忆索引：",
       index,
       "",
-      "使用 memory 工具的 read 操作来读取具体记忆内容；用 search 做 BM25 搜索；用 lint 检查记忆库健康度。",
+      memoryToolAvailable
+        ? "使用 memory 工具的 read 操作来读取具体记忆内容；用 search 做 BM25 搜索；用 lint 检查记忆库健康度。"
+        : "当前模式未提供 memory 工具；请使用上面的索引作为上下文，不要声称已读取索引之外的记忆正文。",
       "",
       "记忆使用原则：",
       "- 记忆是线索，不是事实——使用前先用工具验证（read_file、grep 确认路径和内容是否还存在）",

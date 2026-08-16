@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
@@ -21,6 +22,7 @@ import {
   type IncomingMessage,
   type OutgoingMessage,
 } from "../src/channels/types.ts";
+import type { PromptAssembly } from "../src/context/prompt-builder.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
 import {
   cleanupTempDir,
@@ -91,6 +93,14 @@ function completed(text: string): AgentLoopResult {
   };
 }
 
+function runtimeSnapshot(text: string) {
+  return {
+    surface: "runtime" as const,
+    text,
+    digest: createHash("sha256").update(`runtime\0${text}`).digest("hex"),
+  };
+}
+
 function createGateway(
   statePath: string,
   channel: TestChannel,
@@ -106,6 +116,8 @@ function createGateway(
       summary: string;
       compressedCount: number;
     }>;
+    buildPrompt?: () => PromptAssembly;
+    maxConversationRuntimeStates?: number;
   } = {},
 ): ChannelGateway {
   const registry = new ToolRegistry();
@@ -113,7 +125,7 @@ function createGateway(
     model: {} as LanguageModel,
     registry,
     createRunContext: () => createTestRunContext(registry),
-    buildSystem: () => "system",
+    buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
     statePath,
     runTurn: ({ messages }) => runTurn(messages),
     ...contextOptions,
@@ -134,7 +146,7 @@ describe("channel gateway", () => {
         model: {} as LanguageModel,
         registry: new ToolRegistry(),
         createRunContext: () => createTestRunContext(new ToolRegistry()),
-        buildSystem: () => "system",
+        buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
         statePath,
       });
     };
@@ -595,6 +607,189 @@ describe("channel gateway", () => {
     }
   });
 
+  it("injects a prompt snapshot once and replaces it when the digest changes", async () => {
+    const dir = makeTempDir("channel-prompt-snapshot-");
+    const channel = new TestChannel();
+    const histories: ModelMessage[][] = [];
+    let version = "one";
+    const gateway = createGateway(
+      join(dir, "state.sqlite"),
+      channel,
+      async (messages) => {
+        histories.push([...messages]);
+        return completed("ok");
+      },
+      {
+        buildPrompt: () => ({
+          system: "system",
+          sections: [],
+          snapshots: [
+            { surface: "workspace", text: `rules-${version}`, digest: version },
+          ],
+        }),
+      },
+    );
+
+    try {
+      await withMutedConsole(() => gateway.startAll());
+      await gateway.accept("test", incoming("snapshot-1"));
+      await gateway.waitForIdle();
+      await gateway.accept("test", incoming("snapshot-2"));
+      await gateway.waitForIdle();
+      version = "two";
+      await gateway.accept("test", incoming("snapshot-3"));
+      await gateway.waitForIdle();
+
+      const countSnapshots = (messages: ModelMessage[]) =>
+        messages.filter(
+          (message) =>
+            typeof message.content === "string" &&
+            message.content.includes("<prompt-snapshot"),
+        ).length;
+      assert.equal(countSnapshots(histories[0] ?? []), 1);
+      assert.equal(countSnapshots(histories[1] ?? []), 1);
+      assert.equal(countSnapshots(histories[2] ?? []), 2);
+      assert.match(JSON.stringify(histories[2]), /rules-two/);
+    } finally {
+      await withMutedConsole(() => gateway.stopAll());
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("restores prompt snapshot state after a gateway restart", async () => {
+    const dir = makeTempDir("channel-prompt-snapshot-restart-");
+    const statePath = join(dir, "state.sqlite");
+    const prompt = () => ({
+      system: "system",
+      sections: [],
+      snapshots: [runtimeSnapshot("memory")],
+    });
+    const first = createGateway(
+      statePath,
+      new TestChannel(),
+      async () => completed("first"),
+      { buildPrompt: prompt },
+    );
+    await withMutedConsole(() => first.startAll());
+    await first.accept("test", incoming("snapshot-restart-1"));
+    await first.waitForIdle();
+    await withMutedConsole(() => first.stopAll());
+
+    const histories: ModelMessage[][] = [];
+    const second = createGateway(
+      statePath,
+      new TestChannel(),
+      async (messages) => {
+        histories.push([...messages]);
+        return completed("second");
+      },
+      { buildPrompt: prompt },
+    );
+    try {
+      await withMutedConsole(() => second.startAll());
+      await second.accept("test", incoming("snapshot-restart-2"));
+      await second.waitForIdle();
+      const snapshots = (histories[0] ?? []).filter(
+        (message) =>
+          typeof message.content === "string" &&
+          message.content.includes("<prompt-snapshot"),
+      );
+      assert.equal(snapshots.length, 1);
+    } finally {
+      await withMutedConsole(() => second.stopAll());
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("bounds per-conversation runtime state and restores evicted snapshots", async () => {
+    const dir = makeTempDir("channel-runtime-state-lru-");
+    const histories: ModelMessage[][] = [];
+    const gateway = createGateway(
+      join(dir, "state.sqlite"),
+      new TestChannel(),
+      async (messages) => {
+        histories.push([...messages]);
+        return completed("ok");
+      },
+      {
+        maxConversationRuntimeStates: 2,
+        buildPrompt: () => ({
+          system: "system",
+          sections: [],
+          snapshots: [runtimeSnapshot("memory")],
+        }),
+      },
+    );
+    try {
+      await withMutedConsole(() => gateway.startAll());
+      for (const conversationId of ["one", "two", "three", "one"]) {
+        await gateway.accept(
+          "test",
+          incoming(`lru-${conversationId}-${histories.length}`, {
+            conversationId,
+          }),
+        );
+        await gateway.waitForIdle();
+      }
+
+      const runtime = gateway as unknown as {
+        promptSnapshots: Map<string, unknown>;
+        compactionBreakers: Map<string, unknown>;
+      };
+      assert.equal(runtime.promptSnapshots.size, 2);
+      assert.equal(runtime.compactionBreakers.size, 2);
+      const revisited = histories.at(-1) ?? [];
+      assert.equal(
+        revisited.filter(
+          (message) =>
+            typeof message.content === "string" &&
+            message.content.includes("<prompt-snapshot"),
+        ).length,
+        1,
+      );
+    } finally {
+      await withMutedConsole(() => gateway.stopAll());
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("retries gateway summarization after the breaker fallback", async () => {
+    const dir = makeTempDir("channel-summary-breaker-recovery-");
+    let attempts = 0;
+    const gateway = createGateway(
+      join(dir, "state.sqlite"),
+      new TestChannel(),
+      async () => completed("x".repeat(80)),
+      {
+        contextWindowTokens: 200,
+        autoCompactThresholdTokens: 1,
+        summarizeContext: async (messages) => {
+          attempts++;
+          if (attempts <= 3) throw new Error("temporary summary failure");
+          return {
+            messages: [
+              { role: "user", content: "[recovered summary]" },
+              ...messages.slice(-2),
+            ],
+            summary: "recovered summary",
+            compressedCount: Math.max(0, messages.length - 2),
+          };
+        },
+      },
+    );
+    try {
+      await withMutedConsole(() => gateway.startAll());
+      for (let index = 0; index < 4; index++) {
+        await gateway.accept("test", incoming(`breaker-${index}`));
+        await gateway.waitForIdle();
+      }
+      assert.equal(attempts, 4);
+    } finally {
+      await withMutedConsole(() => gateway.stopAll());
+      cleanupTempDir(dir);
+    }
+  });
+
   it("does not permanently block a conversation after context overflow", async () => {
     const dir = makeTempDir("channel-context-overflow-");
     const channel = new TestChannel();
@@ -684,7 +879,7 @@ describe("channel gateway", () => {
       registry,
       createRunContext: () =>
         createTestRunContext(registry, { requestApproval: async () => true }),
-      buildSystem: () => "system",
+      buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
       statePath,
       contextWindowTokens: 10_000,
       autoCompactThresholdTokens: 9_000,

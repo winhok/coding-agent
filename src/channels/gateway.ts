@@ -3,11 +3,18 @@ import { type AgentLoopResult, agentLoop } from "../agent/loop.js";
 import type { AgentRunContext } from "../agent/run-context.js";
 import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import {
+  CompactionCircuitBreaker,
   type CompactionResult,
   microcompact,
+  pruneOldestContext,
   summarize,
 } from "../context/compressor.js";
 import { applyDefense, estimateMessageTokens } from "../context/defense.js";
+import {
+  type PromptAssembly,
+  PromptSnapshotState,
+  renderPromptSnapshot,
+} from "../context/prompt-builder.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import {
   type AcceptIngressResult,
@@ -33,7 +40,7 @@ interface GatewayOptions {
   model: LanguageModel;
   registry: ToolRegistry;
   createRunContext: () => AgentRunContext;
-  buildSystem: (runContext: AgentRunContext) => string;
+  buildPrompt: (runContext: AgentRunContext) => PromptAssembly;
   statePath?: string;
   store?: ChannelStore;
   runTurn?: (options: RunChannelTurnOptions) => Promise<AgentLoopResult>;
@@ -43,6 +50,7 @@ interface GatewayOptions {
     messages: ModelMessage[],
     existingSummary?: string,
   ) => Promise<CompactionResult>;
+  maxConversationRuntimeStates?: number;
 }
 
 export interface ChannelInfo {
@@ -55,6 +63,7 @@ export interface ChannelInfo {
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 950_000;
 const DEFAULT_AUTOCOMPACT_THRESHOLD_TOKENS = 200_000;
+const DEFAULT_MAX_CONVERSATION_RUNTIME_STATES = 256;
 const CONTEXT_OVERFLOW_REPLY =
   "当前会话上下文仍然过大，已完成安全压缩但无法处理这条消息。请缩短单条消息，或开始一个新的话题后重试。";
 
@@ -71,6 +80,11 @@ export class ChannelGateway {
   private readonly statuses = new Map<string, ChannelStatus>();
   private readonly drains = new Map<string, Promise<void>>();
   private readonly deliveryDrains = new Map<string, Promise<void>>();
+  private readonly promptSnapshots = new Map<string, PromptSnapshotState>();
+  private readonly compactionBreakers = new Map<
+    string,
+    CompactionCircuitBreaker
+  >();
   private readonly options: GatewayOptions;
   private readonly store: ChannelStore;
   private stopping = false;
@@ -219,24 +233,33 @@ export class ChannelGateway {
       }
 
       try {
+        const runContext = this.options.createRunContext();
+        const prompt = this.options.buildPrompt(runContext);
+        const snapshotState = this.getPromptSnapshotState(
+          turn.conversationKey,
+          this.store.loadConversationContext(turn.conversationKey).messages,
+        );
+        const snapshotMessages = snapshotState
+          .selectUpdates(prompt.snapshots)
+          .map(renderPromptSnapshot);
         const userMessage: ModelMessage = {
           role: "user",
           content: turn.message.text,
         };
+        const inputMessages = [...snapshotMessages, userMessage];
         this.store.appendTurnMessages(
           turn.conversationKey,
           turn.id,
-          [userMessage],
+          inputMessages,
           0,
         );
         let context = await this.prepareConversationContext(
           turn.conversationKey,
           false,
         );
-        const runContext = this.options.createRunContext();
-        const system = this.options.buildSystem(runContext);
+        const system = prompt.system;
         let uncommittedToolActivity = false;
-        let nextTurnPosition = 1;
+        let nextTurnPosition = inputMessages.length;
         const committedMessages = new Set<ModelMessage>();
         const commitStepMessages = (messages: ModelMessage[]) => {
           this.store.appendTurnMessages(
@@ -333,6 +356,7 @@ export class ChannelGateway {
     const compactThresholdTokens =
       this.options.autoCompactThresholdTokens ??
       DEFAULT_AUTOCOMPACT_THRESHOLD_TOKENS;
+    const breaker = this.getCompactionBreaker(conversationKey);
 
     const defense = applyDefense(
       loaded.messages,
@@ -344,7 +368,7 @@ export class ChannelGateway {
     let summary = loaded.summary;
     let tokenEstimate = estimateMessageTokens(messages);
 
-    if (force || tokenEstimate > compactThresholdTokens) {
+    if ((force || tokenEstimate > compactThresholdTokens) && !breaker.isOpen) {
       try {
         const compacted = this.options.summarizeContext
           ? await this.options.summarizeContext(messages, summary)
@@ -366,18 +390,20 @@ export class ChannelGateway {
           messages = compacted.messages;
           summary = compacted.summary;
           tokenEstimate = estimateMessageTokens(messages);
+          breaker.recordSuccess();
         }
       } catch (error) {
+        breaker.recordFailure();
         console.error(
           `  [gateway] 上下文摘要失败，将保留防护后的投影: ${errorMessage(error)}`,
         );
       }
     }
 
-    if (force && tokenEstimate > compactThresholdTokens) {
-      const fallback = compactOldestContext(
+    const recoverBreaker = breaker.isOpen;
+    if ((recoverBreaker || force) && tokenEstimate > compactThresholdTokens) {
+      const fallback = pruneOldestContext(
         messages,
-        timestamps,
         Math.max(
           1,
           Math.min(
@@ -387,9 +413,21 @@ export class ChannelGateway {
         ),
         summary,
       );
+      timestamps = timestampsForCompactedSuffix(
+        timestamps,
+        messages.length,
+        fallback.messages.length,
+      );
       messages = fallback.messages;
-      timestamps = fallback.timestamps;
       summary = fallback.summary;
+      if (recoverBreaker) {
+        breaker.recordSuccess();
+        console.error(
+          fallback.compressedCount > 0
+            ? `  [gateway] 连续摘要失败 3 次，已确定性移除 ${fallback.compressedCount} 条旧消息；后续请求将重试摘要`
+            : "  [gateway] 连续摘要失败 3 次，但没有可安全裁剪的旧轮次；后续请求仍将重试摘要",
+        );
+      }
     }
 
     const context: ConversationContext = {
@@ -403,8 +441,50 @@ export class ChannelGateway {
       summary !== originalSummary
     ) {
       this.store.saveContextProjection(conversationKey, context);
+      this.promptSnapshots.get(conversationKey)?.restore(messages);
     }
     return context;
+  }
+
+  private getPromptSnapshotState(
+    conversationKey: string,
+    messages: readonly ModelMessage[],
+  ): PromptSnapshotState {
+    let state = this.promptSnapshots.get(conversationKey);
+    if (!state) {
+      state = new PromptSnapshotState();
+      state.restore(messages);
+    }
+    this.touchRuntimeState(this.promptSnapshots, conversationKey, state);
+    return state;
+  }
+
+  private getCompactionBreaker(
+    conversationKey: string,
+  ): CompactionCircuitBreaker {
+    let breaker = this.compactionBreakers.get(conversationKey);
+    if (!breaker) {
+      breaker = new CompactionCircuitBreaker();
+    }
+    this.touchRuntimeState(this.compactionBreakers, conversationKey, breaker);
+    return breaker;
+  }
+
+  private touchRuntimeState<T>(
+    states: Map<string, T>,
+    conversationKey: string,
+    state: T,
+  ): void {
+    states.delete(conversationKey);
+    states.set(conversationKey, state);
+    const capacity =
+      this.options.maxConversationRuntimeStates ??
+      DEFAULT_MAX_CONVERSATION_RUNTIME_STATES;
+    while (states.size > capacity) {
+      const oldest = states.keys().next().value;
+      if (oldest === undefined) break;
+      states.delete(oldest);
+    }
   }
 
   private runTurn(
@@ -549,46 +629,6 @@ function timestampsForCompactedSuffix(
     result.set(index + 1, before.get(keptFrom + index) ?? Date.now());
   }
   return result;
-}
-
-function compactOldestContext(
-  messages: ModelMessage[],
-  timestamps: Map<number, number>,
-  targetTokens: number,
-  existingSummary?: string,
-): {
-  messages: ModelMessage[];
-  timestamps: Map<number, number>;
-  summary: string;
-} {
-  let keepFrom = -1;
-  for (let index = 1; index < messages.length; index++) {
-    if (messages[index]?.role !== "user") continue;
-    if (estimateMessageTokens(messages.slice(index)) <= targetTokens) {
-      keepFrom = index;
-      break;
-    }
-  }
-  if (keepFrom < 1) {
-    return { messages, timestamps, summary: existingSummary ?? "" };
-  }
-
-  const summary = existingSummary?.trim()
-    ? existingSummary
-    : "较早的对话已从活动上下文中移除；完整记录仍保存在持久化会话历史中。";
-  const marker: ModelMessage = {
-    role: "user",
-    content: `[较早对话的持久化压缩摘要]\n\n${summary}\n\n[以下是最近的对话]`,
-  };
-  const kept = messages.slice(keepFrom);
-  const nextTimestamps = new Map<number, number>([[0, Date.now()]]);
-  for (const [offset] of kept.entries()) {
-    nextTimestamps.set(
-      offset + 1,
-      timestamps.get(keepFrom + offset) ?? Date.now(),
-    );
-  }
-  return { messages: [marker, ...kept], timestamps: nextTimestamps, summary };
 }
 
 function isContextOverflowError(error: unknown): boolean {

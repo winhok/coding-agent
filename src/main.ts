@@ -37,8 +37,10 @@ import { createSkillCommands } from "./commands/skill.js";
 import { loadConfig } from "./config/loader.js";
 import type { SuperAgentConfig } from "./config/schema.js";
 import {
+  CompactionCircuitBreaker,
   estimateTokens,
   microcompact,
+  pruneOldestContext,
   summarize,
 } from "./context/compressor.js";
 import { applyDefense, TokenTracker } from "./context/defense.js";
@@ -49,13 +51,19 @@ import {
 import {
   coreRules,
   deferredTools,
+  delegationGuide,
+  type PromptAssembly,
   PromptBuilder,
   type PromptContext,
-  renderPromptSections,
-  sessionContext,
+  PromptSnapshotState,
+  renderPromptSnapshot,
   toolGuide,
 } from "./context/prompt-builder.js";
-import { memoryContext, ragContext } from "./context/prompt-pipes.js";
+import {
+  memoryContext,
+  ragContext,
+  repositoryRules,
+} from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
 import { MemoryStore } from "./memory/store.js";
 import { PluginManager } from "./plugins/manager.js";
@@ -304,14 +312,20 @@ export async function startAgent(
   const isContinue = options.continueSession;
 
   const builder = new PromptBuilder()
-    .pipe("coreRules", coreRules())
-    .pipe("projectRules", () => projectRules || null)
-    .pipe("toolGuide", toolGuide())
-    .pipe("deferredTools", deferredTools())
-    .pipe("memoryContext", memoryContext(memoryStore))
-    .pipe("skillContext", () => skillLoader.buildPromptSection())
-    .pipe("sessionContext", sessionContext());
-  if (vectorStore) builder.pipe("ragContext", ragContext(vectorStore));
+    .pipe(coreRules())
+    .pipe(repositoryRules(projectRules))
+    .pipe(toolGuide())
+    .pipe(delegationGuide())
+    .pipe(deferredTools())
+    .pipe(memoryContext(memoryStore))
+    .pipe({
+      name: "skillContext",
+      surface: "runtime",
+      requiresTools: ["skill"],
+      render: (ctx) => ctx.skillView.buildPromptSection(),
+    });
+  if (vectorStore) builder.pipe(ragContext(vectorStore));
+  const promptSnapshotState = new PromptSnapshotState();
 
   const rl =
     options.mode === "interactive" || options.approvalMode === "ask"
@@ -376,17 +390,10 @@ export async function startAgent(
     });
   }
 
-  function makePromptCtx(toolView?: ToolView): PromptContext {
-    return {
-      toolCount: toolView
-        ? toolView.getActiveTools().length
-        : registry.getActiveTools().length,
-      deferredToolSummary: toolView
-        ? toolView.getDeferredToolSummary()
-        : registry.getDeferredToolSummary(),
-      sessionMessageCount: messages.length,
-      sessionId: config.session.id,
-    };
+  function makePromptCtx(
+    toolView: ToolView = registry.createView(),
+  ): PromptContext {
+    return { toolView, skillView: skillLoader.createView() };
   }
 
   function createRunContext(
@@ -402,17 +409,17 @@ export async function startAgent(
     });
   }
 
-  function buildSystemFor(runContext: AgentRunContext): string {
-    const sections = builder
-      .buildSections(makePromptCtx(runContext.toolView))
-      .flatMap((section) => {
-        if (section.name !== "skillContext") return [section];
-        const skillCatalog = runContext.toolView.hasSkillCatalogTool()
-          ? runContext.skillView.buildPromptSection()
-          : null;
-        return skillCatalog ? [{ ...section, text: skillCatalog }] : [];
-      });
-    return renderPromptSections(sections);
+  function buildPromptFor(runContext: AgentRunContext): PromptAssembly {
+    return builder.assemble({
+      toolView: runContext.toolView,
+      skillView: runContext.skillView,
+    });
+  }
+
+  function selectPromptSnapshotUpdates(prompt: PromptAssembly): ModelMessage[] {
+    return promptSnapshotState
+      .selectUpdates(prompt.snapshots)
+      .map(renderPromptSnapshot);
   }
 
   function getSpawnContext(): SpawnContextBase {
@@ -437,7 +444,7 @@ export async function startAgent(
         model,
         registry,
         createRunContext,
-        buildSystem: buildSystemFor,
+        buildPrompt: buildPromptFor,
         contextWindowTokens: MODEL_CONFIG.effectiveContextWindowTokens,
         autoCompactThresholdTokens: AUTOCOMPACT_THRESHOLD_TOKENS,
         statePath: config.channels.feishu.enabled
@@ -524,16 +531,19 @@ export async function startAgent(
     cronService.load();
     cronService.setExecutor({
       runAgentPrompt: async (prompt) => {
+        const runContext = createRunContext();
+        const promptAssembly = buildPromptFor(runContext);
         const cronMessages: ModelMessage[] = [
+          ...promptAssembly.snapshots
+            .filter((snapshot) => snapshot.text)
+            .map(renderPromptSnapshot),
           { role: "user", content: prompt },
         ];
-        const runContext = createRunContext();
-        const system = buildSystemFor(runContext);
         await agentLoop({
           model,
           registry,
           messages: cronMessages,
-          system,
+          system: promptAssembly.system,
           runContext,
           eventSink: terminalAgentEventSink,
         });
@@ -564,6 +574,7 @@ export async function startAgent(
   if (isContinue && store.exists()) {
     const loaded = store.load();
     messages = loaded.messages;
+    promptSnapshotState.restore(messages);
     for (const [index, timestamp] of loaded.timestamps) {
       timestamps.set(index, timestamp);
     }
@@ -573,6 +584,7 @@ export async function startAgent(
   }
 
   let summary = "";
+  const compactionBreaker = new CompactionCircuitBreaker();
 
   tokenTracker.addMessages(messages);
 
@@ -606,13 +618,43 @@ export async function startAgent(
       console.log(`  [Microcompact] 清理了 ${compacted.cleared} 个工具结果`);
     }
 
-    const compression = await summarize(model, messages, summary);
-    if (compression.compressedCount > 0) {
-      replaceMessages(compression.messages);
-      summary = compression.summary;
-      console.log(
-        `  [Summarization] 压缩了 ${compression.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+    if (tokenTracker.estimatedTokens <= AUTOCOMPACT_THRESHOLD_TOKENS) {
+      return true;
+    }
+    if (compactionBreaker.isOpen) return true;
+
+    try {
+      const compression = await summarize(model, messages, summary);
+      if (compression.compressedCount > 0) {
+        replaceMessages(compression.messages);
+        summary = compression.summary;
+        compactionBreaker.recordSuccess();
+        promptSnapshotState.restore(messages);
+        console.log(
+          `  [Summarization] 压缩了 ${compression.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+        );
+      }
+    } catch (error) {
+      compactionBreaker.recordFailure();
+      console.error(
+        `  [Summarization] 失败: ${error instanceof Error ? error.message : String(error)}`,
       );
+      if (compactionBreaker.isOpen) {
+        const fallback = pruneOldestContext(
+          messages,
+          Math.floor(AUTOCOMPACT_THRESHOLD_TOKENS * 0.8),
+          summary,
+        );
+        if (fallback.compressedCount > 0) {
+          replaceMessages(fallback.messages);
+          summary = fallback.summary;
+          promptSnapshotState.restore(messages);
+          console.error(
+            `  [Summarization] 连续失败 3 次，已确定性移除 ${fallback.compressedCount} 条旧消息；下次仍会重试摘要`,
+          );
+        }
+        compactionBreaker.recordSuccess();
+      }
     }
     return true;
   }
@@ -620,6 +662,32 @@ export async function startAgent(
   async function executeUserTurn(
     userMsg: ModelMessage,
   ): Promise<CliExecutionResult> {
+    const initialPolicy = resolveCliModePolicy(
+      options.mode,
+      builder.assemble(makePromptCtx()).system,
+      options.approvalMode,
+    );
+    const runContext = createRunContext(initialPolicy.toolSelection);
+    const promptAssembly = buildPromptFor(runContext);
+    const modePolicy = resolveCliModePolicy(
+      options.mode,
+      promptAssembly.system,
+      options.approvalMode,
+    );
+    const snapshotMessages = selectPromptSnapshotUpdates(promptAssembly);
+    if (snapshotMessages.length > 0) {
+      messages.push(...snapshotMessages);
+      tokenTracker.addMessages(snapshotMessages);
+      const now = Date.now();
+      for (
+        let index = messages.length - snapshotMessages.length;
+        index < messages.length;
+        index++
+      ) {
+        timestamps.set(index, now);
+      }
+      store.appendAll(snapshotMessages);
+    }
     messages.push(userMsg);
     tokenTracker.addMessage(userMsg);
     timestamps.set(messages.length - 1, Date.now());
@@ -633,17 +701,6 @@ export async function startAgent(
     replaceMessages(turnDefense.messages);
     await compactIfNeeded();
 
-    const initialPolicy = resolveCliModePolicy(
-      options.mode,
-      builder.build(makePromptCtx()),
-      options.approvalMode,
-    );
-    const runContext = createRunContext(initialPolicy.toolSelection);
-    const modePolicy = resolveCliModePolicy(
-      options.mode,
-      buildSystemFor(runContext),
-      options.approvalMode,
-    );
     const trace = await LocalTraceRecorder.start({
       sessionId: config.session.id,
       model: model.modelId || config.model.name,
@@ -749,7 +806,8 @@ export async function startAgent(
         model,
         makePromptCtx,
         createRunContext,
-        buildSystem: buildSystemFor,
+        buildPrompt: buildPromptFor,
+        selectPromptSnapshotUpdates,
         ask,
         runUserTurn,
         replaceMessages,

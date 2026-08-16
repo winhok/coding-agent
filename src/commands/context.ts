@@ -1,4 +1,3 @@
-import { renderPromptSections } from "../context/prompt-builder.js";
 import {
   buildContextSnapshot,
   renderContextView,
@@ -9,21 +8,17 @@ import type { CommandHandler } from "./index.js";
 export const contextCommands: CommandHandler[] = [
   (cmd, ctx) => {
     if (cmd !== "/context") return false;
-    const sections = ctx.builder.buildSections(ctx.makePromptCtx());
-    const system = renderPromptSections(sections);
-    const memoryChars = sectionChars(sections, "memoryContext");
-    const ragChars = sectionChars(sections, "ragContext");
-    const skillsChars = sectionChars(sections, "skillContext");
+    const assembly = ctx.builder.assemble(ctx.makePromptCtx());
+    const conversationMessages = ctx.messages.filter(
+      (message) => !promptSnapshotSurface(message),
+    );
     const snapshot = buildContextSnapshot({
       modelName: ctx.modelName,
       modelId: ctx.modelId,
       windowTokens: ctx.contextWindowTokens,
       effectiveWindowTokens: ctx.effectiveContextWindowTokens,
       autocompactThresholdTokens: ctx.autocompactThresholdTokens,
-      systemPromptChars: Math.max(
-        0,
-        system.length - memoryChars - ragChars - skillsChars,
-      ),
+      systemPromptChars: assembly.system.length,
       toolDescriptionChars: ctx.registry
         .getActiveTools()
         .reduce(
@@ -36,10 +31,9 @@ export const contextCommands: CommandHandler[] = [
             }).length,
           0,
         ),
-      memoryChars,
-      ragChars,
-      skillsChars,
-      messages: ctx.messages,
+      workspacePromptChars: promptSnapshotChars(ctx.messages, "workspace"),
+      runtimePromptChars: promptSnapshotChars(ctx.messages, "runtime"),
+      messages: conversationMessages,
       tokenMeasurement: ctx.tokenMeasurement,
     });
     console.log(renderContextView(snapshot));
@@ -62,11 +56,26 @@ export const contextCommands: CommandHandler[] = [
   },
 ];
 
-function sectionChars(
-  sections: Array<{ name: string; text: string }>,
-  name: string,
+function promptSnapshotSurface(
+  message: import("ai").ModelMessage,
+): "workspace" | "runtime" | undefined {
+  if (typeof message.content !== "string") return undefined;
+  const match = message.content.match(
+    /^<prompt-snapshot surface="(workspace|runtime)"/,
+  );
+  return match?.[1] as "workspace" | "runtime" | undefined;
+}
+
+function promptSnapshotChars(
+  messages: import("ai").ModelMessage[],
+  surface: "workspace" | "runtime",
 ): number {
-  return sections
-    .filter((section) => section.name === name)
-    .reduce((total, section) => total + section.text.length, 0);
+  return messages.reduce(
+    (total, message) =>
+      promptSnapshotSurface(message) === surface &&
+      typeof message.content === "string"
+        ? total + message.content.length
+        : total,
+    0,
+  );
 }

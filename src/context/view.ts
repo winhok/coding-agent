@@ -26,7 +26,6 @@ const COLORS = {
   system: 63,
   tools: 99,
   memory: 220,
-  skills: 36,
   messages: 111,
   free: 240,
   buffer: 244,
@@ -211,9 +210,8 @@ export interface BuildSnapshotInput {
   autocompactThresholdTokens: number;
   systemPromptChars: number;
   toolDescriptionChars: number;
-  memoryChars: number;
-  ragChars: number;
-  skillsChars: number;
+  workspacePromptChars: number;
+  runtimePromptChars: number;
   messages: ModelMessage[];
   tokenMeasurement: TokenMeasurement;
 }
@@ -269,22 +267,16 @@ export function buildContextSnapshot(
       icon: "◇",
     },
     {
-      name: "Memory",
-      tokens: approxTokensFromChars(input.memoryChars),
+      name: "Workspace prompt",
+      tokens: approxTokensFromChars(input.workspacePromptChars),
       color: COLORS.memory,
       icon: "◈",
     },
     {
-      name: "RAG",
-      tokens: approxTokensFromChars(input.ragChars),
+      name: "Runtime prompt",
+      tokens: approxTokensFromChars(input.runtimePromptChars),
       color: 214,
       icon: "◐",
-    },
-    {
-      name: "Skills",
-      tokens: approxTokensFromChars(input.skillsChars),
-      color: COLORS.skills,
-      icon: "◉",
     },
     {
       name: "Messages",

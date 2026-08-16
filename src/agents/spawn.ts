@@ -4,6 +4,11 @@ import {
   type AgentRunContext,
   deriveAgentRunContext,
 } from "../agent/run-context.js";
+import {
+  type PromptAssembly,
+  PromptBuilder,
+  renderPromptSnapshot,
+} from "../context/prompt-builder.js";
 import type { SkillView } from "../skills/loader.js";
 import type { ToolRegistry, ToolView } from "../tools/registry.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
@@ -43,14 +48,14 @@ function agentTag(index: number, runId: string): string {
   return `${color}[Agent-${index + 1}:${runId}]${RESET}`;
 }
 
-function buildSubAgentSystem(
+function buildSubAgentPrompt(
   profileName: string,
   profile: SubAgentProfile,
   toolView: ToolView,
   skillView: SkillView,
   workingDir: string,
   projectRules?: string,
-): string {
+): PromptAssembly {
   const activeTools = toolView
     .getActiveTools()
     .map((tool) => tool.name)
@@ -59,18 +64,33 @@ function buildSubAgentSystem(
   const skills = toolView.hasSkillCatalogTool()
     ? skillView.buildPromptSection()
     : null;
-  return [
-    `你是独立执行单个任务的子 Agent，Profile 为 ${profileName}。`,
-    profile.systemPrompt,
-    "只处理收到的任务；不要假设主 Agent 的对话历史。需要多个独立信息时可并行调用工具。",
-    `当前工作目录：${workingDir}`,
-    projectRules,
-    `当前可见工具：${activeTools || "无"}`,
-    deferred,
-    skills,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  return new PromptBuilder()
+    .pipe({
+      name: "subAgentRules",
+      surface: "system",
+      render: () =>
+        [
+          `你是独立执行单个任务的子 Agent，Profile 为 ${profileName}。`,
+          profile.systemPrompt,
+          "只处理收到的任务；不要假设主 Agent 的对话历史。需要多个独立信息时可并行调用工具。",
+          projectRules,
+        ].join("\n\n"),
+    })
+    .pipe({
+      name: "subAgentWorkspace",
+      surface: "workspace",
+      render: () =>
+        [`当前工作目录：${workingDir}`].filter(Boolean).join("\n\n"),
+    })
+    .pipe({
+      name: "subAgentTools",
+      surface: "runtime",
+      render: () =>
+        [`当前可见工具：${activeTools || "无"}`, deferred, skills]
+          .filter(Boolean)
+          .join("\n\n"),
+    })
+    .assemble({ toolView, skillView });
 }
 
 export async function spawnAgent(
@@ -91,7 +111,6 @@ export async function spawnAgent(
 
   const runId = ctx.agentRegistry.generateId();
   const tag = agentTag(index, runId);
-  const messages: ModelMessage[] = [{ role: "user", content: request.task }];
   ctx.agentRegistry.register({
     id: runId,
     task: request.task,
@@ -122,6 +141,20 @@ export async function spawnAgent(
     signal,
     toolView: childToolView,
   });
+  const prompt = buildSubAgentPrompt(
+    resolved.name,
+    resolved.profile,
+    childRunContext.toolView,
+    childRunContext.skillView,
+    childRunContext.workingDir,
+    ctx.projectRules,
+  );
+  const messages: ModelMessage[] = [
+    ...prompt.snapshots
+      .filter((snapshot) => snapshot.text)
+      .map(renderPromptSnapshot),
+    { role: "user", content: request.task },
+  ];
   let partialText = "";
   let trace: LocalTraceRecorder | undefined;
 
@@ -164,14 +197,7 @@ export async function spawnAgent(
       model: ctx.model,
       registry: ctx.registry,
       messages,
-      system: buildSubAgentSystem(
-        resolved.name,
-        resolved.profile,
-        childRunContext.toolView,
-        childRunContext.skillView,
-        childRunContext.workingDir,
-        ctx.projectRules,
-      ),
+      system: prompt.system,
       runContext: childRunContext,
       ...(ctx.tracker ? { tracker: ctx.tracker } : {}),
       eventSink,

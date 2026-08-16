@@ -21,18 +21,27 @@ export const dreamCommands: CommandHandler[] = [
     if (cmd !== "/dream" && cmd !== "dream") return false;
     console.log("\n[dream] 开始记忆整理...");
 
-    const userMessage: ModelMessage = { role: "user", content: DREAM_PROMPT };
-    ctx.messages.push(userMessage);
-    ctx.timestamps.set(ctx.messages.length - 1, Date.now());
-    ctx.sessionStore.append(userMessage);
-
     const runContext = ctx.createRunContext();
-    const currentSystem = ctx.buildSystem(runContext);
+    const prompt = ctx.buildPrompt(runContext);
+    const snapshotMessages = ctx.selectPromptSnapshotUpdates(prompt);
+    const userMessage: ModelMessage = { role: "user", content: DREAM_PROMPT };
+    const addedMessages = [...snapshotMessages, userMessage];
+    ctx.messages.push(...addedMessages);
+    const now = Date.now();
+    for (
+      let index = ctx.messages.length - addedMessages.length;
+      index < ctx.messages.length;
+      index++
+    ) {
+      ctx.timestamps.set(index, now);
+    }
+    ctx.sessionStore.appendAll(addedMessages);
+
     agentLoop({
       model: ctx.model,
       registry: ctx.registry,
       messages: ctx.messages,
-      system: currentSystem,
+      system: prompt.system,
       runContext,
       tracker: ctx.tracker,
       eventSink: terminalAgentEventSink,

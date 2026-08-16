@@ -16,6 +16,13 @@ function estimateTokens(messages: ModelMessage[]): number {
           chars += part.text.length;
         } else if ("output" in part) {
           chars += toolResultOutputToText(part.output).length;
+        } else if ("input" in part) {
+          chars +=
+            String("toolName" in part ? part.toolName : "").length +
+            String("toolCallId" in part ? part.toolCallId : "").length +
+            JSON.stringify(part.input ?? {}).length;
+        } else {
+          chars += JSON.stringify(part).length;
         }
       }
     }
@@ -96,9 +103,9 @@ const COMPRESS_PROMPT = `你是一个对话压缩系统。你的任务是把 Age
 
 注意事项：
 - 用对话中使用的语言（中文或英文）输出
-- 文件路径、UUID、版本号等标识符必须原样保留，不要翻译或改写
+- 文件路径、UUID、版本号、工具名、toolCallId 和参数等标识符必须原样保留，不要翻译或改写
 - 不要写笼统的概述，只保留具体的、可操作的信息
-- 总长度控制在 800 字以内`;
+- 保留未完成操作、失败原因、用户约束和下一步，不要把计划误写成已完成`;
 
 const CONTEXT_TOKEN_THRESHOLD = 300;
 const KEEP_RECENT_MESSAGES = 6;
@@ -106,12 +113,52 @@ const KEEP_RECENT_MESSAGES = 6;
 export interface SummarizeOptions {
   thresholdTokens?: number;
   keepRecentMessages?: number;
+  maxOutputTokens?: number;
 }
 
 export interface CompactionResult {
   messages: ModelMessage[];
   summary: string;
   compressedCount: number;
+}
+
+export class CompactionCircuitBreaker {
+  private failures = 0;
+
+  constructor(readonly maxFailures = 3) {}
+
+  get isOpen(): boolean {
+    return this.failures >= this.maxFailures;
+  }
+
+  recordSuccess(): void {
+    this.failures = 0;
+  }
+
+  recordFailure(): void {
+    this.failures++;
+  }
+}
+
+export function serializeMessageForCompaction(message: ModelMessage): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .map((rawPart) => {
+      const part = rawPart as unknown as Record<string, unknown>;
+      if (part.type === "text" && typeof part.text === "string") {
+        return part.text;
+      }
+      if (part.type === "tool-call") {
+        return `[tool-call name=${String(part.toolName ?? "unknown")} toolCallId=${String(part.toolCallId ?? "unknown")}] ${JSON.stringify(part.input ?? {})}`;
+      }
+      if (part.type === "tool-result" && "output" in part) {
+        return `[tool-result name=${String(part.toolName ?? "unknown")} toolCallId=${String(part.toolCallId ?? "unknown")}] ${toolResultOutputToText(part.output as Parameters<typeof toolResultOutputToText>[0])}`;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 export async function summarize(
@@ -123,6 +170,7 @@ export async function summarize(
   const tokenEstimate = estimateTokens(messages);
   const thresholdTokens = options.thresholdTokens ?? CONTEXT_TOKEN_THRESHOLD;
   const keepRecentMessages = options.keepRecentMessages ?? KEEP_RECENT_MESSAGES;
+  const maxOutputTokens = options.maxOutputTokens ?? 4_000;
   if (
     tokenEstimate < thresholdTokens ||
     messages.length <= keepRecentMessages
@@ -145,20 +193,7 @@ export async function summarize(
 
   const conversationText = toCompress
     .map((msg) => {
-      const content =
-        typeof msg.content === "string"
-          ? msg.content
-          : Array.isArray(msg.content)
-            ? msg.content
-                .map((part) =>
-                  "text" in part
-                    ? part.text
-                    : "output" in part
-                      ? toolResultOutputToText(part.output)
-                      : "",
-                )
-                .join("")
-            : "";
+      const content = serializeMessageForCompaction(msg);
       return content ? `**${msg.role}**: ${content}` : "";
     })
     .filter(Boolean)
@@ -172,29 +207,61 @@ export async function summarize(
     ? `## 已有摘要（上一次压缩的结果）\n\n${existingSummary}\n\n## 需要压缩的新对话\n\n${conversationText}`
     : conversationText;
 
-  try {
-    const { text: summary } = await generateText({
-      model,
-      system: COMPRESS_PROMPT,
-      prompt: userPrompt,
-    });
-
-    const summaryMessage: ModelMessage = {
-      role: "user",
-      content: `[以下是之前对话的压缩摘要]\n\n${summary}\n\n[摘要结束，以下是最近的对话]`,
-    };
-
-    const newMessages: ModelMessage[] = [summaryMessage, ...toKeep];
-
-    return {
-      messages: newMessages,
-      summary,
-      compressedCount: toCompress.length,
-    };
-  } catch (err) {
-    console.error("[Compaction] LLM 摘要失败:", err);
-    return { messages, summary: existingSummary || "", compressedCount: 0 };
+  const { text, finishReason } = await generateText({
+    model,
+    system: `${COMPRESS_PROMPT}\n- 摘要输出不得超过 ${maxOutputTokens} tokens`,
+    prompt: userPrompt,
+    maxOutputTokens,
+  });
+  if (finishReason !== "stop") {
+    throw new Error(
+      `Compaction ended with ${finishReason} before a complete summary was confirmed`,
+    );
   }
+  const summary = text.trim();
+  if (!summary) throw new Error("Compaction returned an empty summary");
+
+  const summaryMessage: ModelMessage = {
+    role: "user",
+    content: `<compacted-summary>\n${summary}\n</compacted-summary>`,
+  };
+  const newMessages: ModelMessage[] = [summaryMessage, ...toKeep];
+  if (estimateTokens(newMessages) >= tokenEstimate) {
+    throw new Error("Compaction made no token progress");
+  }
+
+  return { messages: newMessages, summary, compressedCount: toCompress.length };
+}
+
+export function pruneOldestContext(
+  messages: ModelMessage[],
+  targetTokens: number,
+  existingSummary?: string,
+): CompactionResult {
+  let keepFrom = -1;
+  for (let index = 1; index < messages.length; index++) {
+    if (messages[index]?.role !== "user") continue;
+    if (estimateTokens(messages.slice(index)) <= targetTokens) {
+      keepFrom = index;
+      break;
+    }
+  }
+  if (keepFrom < 1) {
+    return { messages, summary: existingSummary ?? "", compressedCount: 0 };
+  }
+
+  const summary = existingSummary?.trim()
+    ? existingSummary
+    : "较早的对话已从活动上下文中移除；完整记录仍保存在持久化会话历史中。";
+  const marker: ModelMessage = {
+    role: "user",
+    content: `<compacted-summary kind="deterministic-prune">\n${summary}\n</compacted-summary>`,
+  };
+  return {
+    messages: [marker, ...messages.slice(keepFrom)],
+    summary,
+    compressedCount: keepFrom,
+  };
 }
 
 export { estimateTokens };

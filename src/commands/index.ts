@@ -2,6 +2,7 @@ import type { LanguageModel, ModelMessage } from "ai";
 import type { AgentRunContext } from "../agent/run-context.js";
 import type { TokenMeasurement } from "../context/defense.js";
 import type {
+  PromptAssembly,
   PromptBuilder,
   PromptContext,
 } from "../context/prompt-builder.js";
@@ -22,7 +23,8 @@ export interface CommandContext {
   model: LanguageModel;
   makePromptCtx: () => PromptContext;
   createRunContext: () => AgentRunContext;
-  buildSystem: (runContext: AgentRunContext) => string;
+  buildPrompt: (runContext: AgentRunContext) => PromptAssembly;
+  selectPromptSnapshotUpdates: (prompt: PromptAssembly) => ModelMessage[];
   ask: () => void;
   runUserTurn: (message: ModelMessage) => void;
   replaceMessages: (messages: ModelMessage[]) => void;

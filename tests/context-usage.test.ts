@@ -2,20 +2,30 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   PromptBuilder,
-  renderPromptSections,
+  PromptSnapshotState,
+  renderPromptSnapshot,
 } from "../src/context/prompt-builder.ts";
+import { memoryContext, repositoryRules } from "../src/context/prompt-pipes.ts";
 import {
   buildContextSnapshot,
   renderContextMatrix,
   renderContextView,
   renderUsageView,
 } from "../src/context/view.ts";
+import { MemoryStore } from "../src/memory/store.ts";
+import { createMemoryTool } from "../src/tools/memory-tools.ts";
+import { ToolRegistry } from "../src/tools/registry.ts";
 import {
   computeCost,
   normalizeUsage,
   promptTokensFromUsage,
   UsageTracker,
 } from "../src/usage/tracker.ts";
+import {
+  cleanupTempDir,
+  createTestRunContext,
+  makeTempDir,
+} from "./helpers.ts";
 
 describe("usage tracking", () => {
   it("normalizes AI SDK 7 cache usage", () => {
@@ -76,9 +86,8 @@ describe("context and usage views", () => {
       autocompactThresholdTokens: 200_000,
       systemPromptChars: 350,
       toolDescriptionChars: 700,
-      memoryChars: 0,
-      ragChars: 0,
-      skillsChars: 0,
+      workspacePromptChars: 0,
+      runtimePromptChars: 0,
       messages: [{ role: "user", content: "hello" }],
       tokenMeasurement: {
         observedPromptTokens: null,
@@ -107,9 +116,8 @@ describe("context and usage views", () => {
       autocompactThresholdTokens: 200_000,
       systemPromptChars: 350,
       toolDescriptionChars: 700,
-      memoryChars: 35,
-      ragChars: 70,
-      skillsChars: 0,
+      workspacePromptChars: 35,
+      runtimePromptChars: 70,
       messages: [],
       tokenMeasurement: {
         observedPromptTokens: 4_500,
@@ -132,22 +140,177 @@ describe("context and usage views", () => {
 
   it("builds the sent prompt from the same named sections used for metering", () => {
     const builder = new PromptBuilder()
-      .pipe("coreRules", () => "core")
-      .pipe("memoryContext", () => "memory")
-      .pipe("ragContext", () => null);
-    const context = {
-      toolCount: 0,
-      deferredToolSummary: "",
-      sessionMessageCount: 0,
-      sessionId: "test",
-    };
-    const sections = builder.buildSections(context);
+      .pipe({ name: "coreRules", surface: "system", render: () => "core" })
+      .pipe({
+        name: "memoryContext",
+        surface: "runtime",
+        render: () => "memory",
+      })
+      .pipe({
+        name: "delegation",
+        surface: "runtime",
+        requiresTools: ["spawn_agent"],
+        render: () => "delegate",
+      })
+      .pipe({ name: "ragContext", surface: "runtime", render: () => null });
+    const registry = new ToolRegistry();
+    const runContext = createTestRunContext(registry);
+    const assembly = builder.assemble({
+      toolView: runContext.toolView,
+      skillView: runContext.skillView,
+    });
 
-    assert.deepEqual(sections, [
-      { name: "coreRules", text: "core" },
-      { name: "memoryContext", text: "memory" },
+    assert.deepEqual(assembly.sections, [
+      { name: "coreRules", surface: "system", text: "core" },
+      { name: "memoryContext", surface: "runtime", text: "memory" },
     ]);
-    assert.equal(builder.build(context), renderPromptSections(sections));
+    assert.equal(assembly.system, "core");
+    assert.equal(
+      assembly.snapshots.find((snapshot) => snapshot.surface === "runtime")
+        ?.text,
+      "memory",
+    );
+    assert.doesNotMatch(
+      assembly.snapshots.find((snapshot) => snapshot.surface === "runtime")
+        ?.text ?? "",
+      /delegate/,
+    );
+  });
+
+  it("emits complete snapshots only when their digest changes", () => {
+    const state = new PromptSnapshotState();
+    const snapshots = [
+      { surface: "workspace" as const, text: "rules", digest: "one" },
+      { surface: "runtime" as const, text: "", digest: "empty" },
+    ];
+
+    assert.deepEqual(state.selectUpdates(snapshots), [snapshots[0]]);
+    assert.deepEqual(state.selectUpdates(snapshots), []);
+    const changed = {
+      surface: "workspace" as const,
+      text: "new",
+      digest: "two",
+    };
+    assert.deepEqual(state.selectUpdates([changed]), [changed]);
+  });
+
+  it("restores snapshot digests from persisted messages", () => {
+    const state = new PromptSnapshotState();
+    const registry = new ToolRegistry();
+    const runContext = createTestRunContext(registry);
+    const snapshot = new PromptBuilder()
+      .pipe({
+        name: "memory",
+        surface: "runtime",
+        render: () => "memory index",
+      })
+      .assemble({
+        toolView: runContext.toolView,
+        skillView: runContext.skillView,
+      }).snapshots[1];
+    assert.ok(snapshot);
+
+    state.restore([renderPromptSnapshot(snapshot)]);
+
+    assert.deepEqual(state.selectUpdates([snapshot]), []);
+  });
+
+  it("ignores snapshot tags nested in summaries or user text", () => {
+    const state = new PromptSnapshotState();
+    const registry = new ToolRegistry();
+    const runContext = createTestRunContext(registry);
+    const snapshot = new PromptBuilder()
+      .pipe({
+        name: "memory",
+        surface: "runtime",
+        render: () => "memory index",
+      })
+      .assemble({
+        toolView: runContext.toolView,
+        skillView: runContext.skillView,
+      }).snapshots[1];
+    assert.ok(snapshot);
+
+    state.restore([
+      {
+        role: "user",
+        content: `<compacted-summary>partial text <prompt-snapshot surface="runtime" digest="${snapshot.digest}"></compacted-summary>`,
+      },
+    ]);
+
+    assert.deepEqual(state.selectUpdates([snapshot]), [snapshot]);
+  });
+
+  it("ignores a complete snapshot wrapper whose body does not match its digest", () => {
+    const state = new PromptSnapshotState();
+    const registry = new ToolRegistry();
+    const runContext = createTestRunContext(registry);
+    const snapshot = new PromptBuilder()
+      .pipe({
+        name: "memory",
+        surface: "runtime",
+        render: () => "memory index",
+      })
+      .assemble({
+        toolView: runContext.toolView,
+        skillView: runContext.skillView,
+      }).snapshots[1];
+    assert.ok(snapshot);
+    const rendered = renderPromptSnapshot(snapshot);
+    if (typeof rendered.content !== "string") {
+      throw new TypeError("Expected a string snapshot wrapper");
+    }
+    const tampered = {
+      role: "user" as const,
+      content: rendered.content.replace("memory index", "partial"),
+    };
+
+    state.restore([tampered]);
+
+    assert.deepEqual(state.selectUpdates([snapshot]), [snapshot]);
+  });
+
+  it("keeps the memory index in read-only prompt contexts", () => {
+    const dir = makeTempDir("readonly-memory-prompt-");
+    const memoryStore = new MemoryStore(dir);
+    memoryStore.save({
+      name: "user preference",
+      description: "prefers concise answers",
+      type: "user",
+      content: "Keep answers concise.",
+    });
+    const registry = new ToolRegistry();
+    registry.register(createMemoryTool(memoryStore));
+    const builder = new PromptBuilder().pipe(memoryContext(memoryStore));
+
+    try {
+      const assembly = builder.assemble({
+        toolView: registry.createView({ readOnlyOnly: true }),
+        skillView: createTestRunContext(registry).skillView,
+      });
+      assert.match(assembly.snapshots[1]?.text ?? "", /user preference/);
+      assert.match(assembly.snapshots[1]?.text ?? "", /未提供 memory 工具/);
+    } finally {
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("keeps repository rules in the system authority surface", () => {
+    const registry = new ToolRegistry();
+    const runContext = createTestRunContext(registry);
+    const assembly = new PromptBuilder()
+      .pipe(repositoryRules("must follow repository policy"))
+      .assemble({
+        toolView: runContext.toolView,
+        skillView: runContext.skillView,
+      });
+
+    assert.match(assembly.system, /must follow repository policy/);
+    assert.equal(
+      assembly.snapshots.find((snapshot) => snapshot.surface === "workspace")
+        ?.text,
+      "",
+    );
   });
 
   it("uses the tracker currency in the usage view", () => {
