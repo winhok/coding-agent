@@ -371,7 +371,11 @@ async function runAgentLoopCore({
 
       await runContext.inputEffectGate?.wait(runContext.signal);
 
-      let responseMessages: ModelMessage[] = stepResponse.messages;
+      let responseMessages: ModelMessage[] = runContext.toolGuardrail
+        ? (runContext.toolGuardrail.redact(
+            stepResponse.messages,
+          ) as ModelMessage[])
+        : stepResponse.messages;
       if (outputGuardrail) {
         const decision = await outputGuardrail.check(
           fullText,

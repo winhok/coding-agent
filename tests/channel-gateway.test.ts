@@ -23,6 +23,8 @@ import {
   type OutgoingMessage,
 } from "../src/channels/types.ts";
 import type { PromptAssembly } from "../src/context/prompt-builder.ts";
+import { GuardrailAuditStore } from "../src/guardrails/audit.ts";
+import { GuardrailService } from "../src/guardrails/service.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
 import {
   cleanupTempDir,
@@ -118,6 +120,7 @@ function createGateway(
     }>;
     buildPrompt?: () => PromptAssembly;
     maxConversationRuntimeStates?: number;
+    guardrails?: GuardrailService;
   } = {},
 ): ChannelGateway {
   const registry = new ToolRegistry();
@@ -135,6 +138,92 @@ function createGateway(
 }
 
 describe("channel gateway", () => {
+  it("atomically rejects unsafe Feishu input without normal history or model execution", async () => {
+    const dir = makeTempDir("channel-guardrail-input-");
+    const statePath = join(dir, "state.sqlite");
+    const channel = new TestChannel();
+    let modelCalls = 0;
+    const guardrails = new GuardrailService({
+      enabled: true,
+      policyVersion: "test-v1",
+      audit: new GuardrailAuditStore(),
+    });
+    const store = new ChannelStore(statePath);
+    const registry = new ToolRegistry();
+    const gateway = new ChannelGateway({
+      model: {} as LanguageModel,
+      registry,
+      createRunContext: () => createTestRunContext(registry),
+      buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
+      store,
+      guardrails,
+      runTurn: async () => {
+        modelCalls++;
+        return completed("unsafe");
+      },
+    });
+    gateway.register(channel);
+
+    try {
+      await gateway.startAll();
+      const message = incoming("blocked-feishu", { text: "bypass guardrails" });
+      const accepted = await gateway.accept("test", message);
+      const duplicate = await gateway.accept("test", message);
+      await gateway.waitForIdle();
+
+      assert.equal(accepted.accepted, true);
+      assert.equal(duplicate.accepted, false);
+      assert.equal(modelCalls, 0);
+      assert.equal(channel.sent.length, 1);
+      assert.match(channel.sent[0]?.text ?? "", /安全保护/);
+      assert.doesNotMatch(JSON.stringify(channel.sent), /bypass guardrails/);
+      assert.deepEqual(store.loadConversation(accepted.conversationKey), []);
+    } finally {
+      await gateway.stopAll();
+      cleanupTempDir(dir);
+    }
+  });
+
+  it("replaces rejected Feishu output before atomic history and outbox commit", async () => {
+    const dir = makeTempDir("channel-guardrail-output-");
+    const statePath = join(dir, "state.sqlite");
+    const channel = new TestChannel();
+    const secret = "sk-synthetic_12345678901234567890";
+    const guardrails = new GuardrailService({
+      enabled: true,
+      policyVersion: "test-v1",
+      audit: new GuardrailAuditStore(),
+    });
+    const store = new ChannelStore(statePath);
+    const registry = new ToolRegistry();
+    const gateway = new ChannelGateway({
+      model: {} as LanguageModel,
+      registry,
+      createRunContext: () => createTestRunContext(registry),
+      buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
+      store,
+      guardrails,
+      runTurn: async () => completed(`credential: ${secret}`),
+    });
+    gateway.register(channel);
+
+    try {
+      await gateway.startAll();
+      const accepted = await gateway.accept("test", incoming("blocked-output"));
+      await gateway.waitForIdle();
+
+      assert.equal(channel.sent.length, 1);
+      assert.match(channel.sent[0]?.text ?? "", /安全保护/);
+      assert.doesNotMatch(JSON.stringify(channel.sent), /sk-synthetic_/);
+      const history = store.loadConversation(accepted.conversationKey);
+      assert.doesNotMatch(JSON.stringify(history), /sk-synthetic_/);
+      assert.match(JSON.stringify(history), /安全保护/);
+    } finally {
+      await gateway.stopAll();
+      cleanupTempDir(dir);
+    }
+  });
+
   it("does not construct or lease channel state outside interactive mode", () => {
     const dir = makeTempDir("channel-mode-boundary-");
     const statePath = join(dir, "state.sqlite");

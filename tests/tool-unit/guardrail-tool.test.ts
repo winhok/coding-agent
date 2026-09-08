@@ -161,6 +161,50 @@ describe("tool guardrail", () => {
     );
   });
 
+  it("removes blocked tool arguments before they enter later model context", async () => {
+    const secret = "synthetic-blocked-argument";
+    let executed = false;
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        modelCalls++;
+        if (modelCalls === 1) {
+          return toolCallStream("blocked-1", "probe", { note: secret });
+        }
+        assert.doesNotMatch(JSON.stringify(options.prompt), new RegExp(secret));
+        assert.match(JSON.stringify(options.prompt), /REDACTED/);
+        return textStream("blocked safely");
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "probe",
+      description: "probe",
+      parameters: { type: "object", additionalProperties: true },
+      isReadOnly: true,
+      execute: async () => {
+        executed = true;
+        return "ran";
+      },
+    });
+    const context = createTestRunContext(registry);
+    context.toolGuardrail = guardrailService(undefined, [
+      secret,
+    ]).createToolGuardrail({ source: "cli", role: "owner" });
+    const messages = [{ role: "user" as const, content: "probe" }];
+
+    await agentLoop({
+      model,
+      registry,
+      messages,
+      system: "test",
+      runContext: context,
+    });
+
+    assert.equal(executed, false);
+    assert.doesNotMatch(JSON.stringify(messages), new RegExp(secret));
+  });
+
   it("routes registered, deferred, MCP, and child-spawn tools through the same check", async () => {
     const audit = new GuardrailAuditStore();
     const service = guardrailService(audit);

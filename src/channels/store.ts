@@ -77,6 +77,10 @@ export interface AcceptIngressResult {
   turnId?: string;
 }
 
+export interface RejectIngressResult extends AcceptIngressResult {
+  outbox?: OutboxEntry;
+}
+
 export interface ChannelQueueStats {
   pendingTurns: number;
   failedTurns: number;
@@ -402,6 +406,116 @@ export class ChannelStore {
       conversationKey,
       logicalMessageId,
       ...(accepted ? { turnId } : {}),
+    };
+  }
+
+  rejectIngress(
+    channelName: string,
+    message: IncomingMessage,
+    safeReply: string,
+  ): RejectIngressResult {
+    const conversationKey = ChannelStore.conversationKey(channelName, message);
+    const logicalMessageId = ChannelStore.logicalMessageId(
+      channelName,
+      message,
+    );
+    const turnId = randomUUID();
+    const outboxId = randomUUID();
+    const now = Date.now();
+    const { raw: _raw, ...routingMessage } = message;
+    const durableMessage = { ...routingMessage, text: "[guardrail-blocked]" };
+    const outgoing: OutgoingMessage = {
+      conversationId: message.conversationId,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+      ...(message.replyToMessageId
+        ? { replyToMessageId: message.replyToMessageId }
+        : {}),
+      ...(message.replyInThread
+        ? { replyInThread: message.replyInThread }
+        : {}),
+      text: safeReply,
+      deliveryId: outboxId,
+    };
+    const reject = this.db.transaction(() => {
+      this.assertLeaseOwned();
+      const existing = this.db
+        .prepare(
+          "SELECT status FROM channel_ingress WHERE logical_message_id = ?",
+        )
+        .get(logicalMessageId) as StatusRow | undefined;
+      if (existing) return false;
+      const payload = JSON.stringify(durableMessage);
+      this.db
+        .prepare(
+          `INSERT INTO channel_turn_queue
+           (id, conversation_key, logical_message_id, channel_name, account_id,
+            payload_json, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)`,
+        )
+        .run(
+          turnId,
+          conversationKey,
+          logicalMessageId,
+          channelName,
+          message.accountId,
+          payload,
+          now,
+          now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO channel_ingress
+           (logical_message_id, transport_event_id, channel_name, account_id,
+            conversation_key, payload_json, status, received_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'adopted', ?, ?)`,
+        )
+        .run(
+          logicalMessageId,
+          message.transportEventId,
+          channelName,
+          message.accountId,
+          conversationKey,
+          payload,
+          message.receivedAt,
+          now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO channel_outbox
+           (id, conversation_key, turn_id, channel_name, payload_json,
+            status, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+        )
+        .run(
+          outboxId,
+          conversationKey,
+          turnId,
+          channelName,
+          JSON.stringify(outgoing),
+          now,
+          now,
+        );
+      return true;
+    });
+    const accepted = reject();
+    return {
+      accepted,
+      conversationKey,
+      logicalMessageId,
+      ...(accepted
+        ? {
+            turnId,
+            outbox: {
+              id: outboxId,
+              channelName,
+              conversationKey,
+              turnId,
+              message: outgoing,
+              status: "pending" as const,
+              attempts: 0,
+            },
+          }
+        : {}),
     };
   }
 

@@ -109,9 +109,13 @@ export class GuardrailService {
     return {
       check: ({ tool, input, workingDir }) =>
         this.checkTool({ tool, input, workingDir, ...context }),
-      redact: (value) => redactSensitiveValue(value, this.options.knownSecrets),
+      redact: (value) => this.redactActivity(value),
       rejection: safeToolRejection,
     };
+  }
+
+  redactActivity(value: unknown): unknown {
+    return redactSensitiveValue(value, this.options.knownSecrets);
   }
 }
 
@@ -129,6 +133,10 @@ export function safeOutputReplacement(decision: GuardrailDecision): string {
     default:
       return "响应未通过安全检查，已被拦截。请调整请求后重试。";
   }
+}
+
+export function safeInputRejection(): string {
+  return "该消息触发了安全保护，未交给智能助手处理。请移除敏感信息、越权或绕过内容后重试。";
 }
 
 function safeToolRejection(_decision: GuardrailDecision): string {

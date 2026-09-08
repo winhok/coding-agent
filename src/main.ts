@@ -505,6 +505,7 @@ export async function startAgent(
   function createRunContext(
     selection?: ToolSelection,
     signal: AbortSignal = runtimeController.signal,
+    source: "cli" | "feishu" | "cron" = "cli",
   ): AgentRunContext {
     return createAgentRunContext(workingDir, {
       agentId: "root",
@@ -515,7 +516,7 @@ export async function startAgent(
       ...(config.guardrails.enabled
         ? {
             toolGuardrail: guardrails.createToolGuardrail({
-              source: "cli",
+              source,
               role: registry.getRole(),
               conversationId: config.session.id,
             }),
@@ -558,13 +559,15 @@ export async function startAgent(
       new ChannelGateway({
         model,
         registry,
-        createRunContext,
+        createRunContext: (source) =>
+          createRunContext(undefined, runtimeController.signal, source),
         buildPrompt: buildPromptFor,
         contextWindowTokens: MODEL_CONFIG.effectiveContextWindowTokens,
         autoCompactThresholdTokens: AUTOCOMPACT_THRESHOLD_TOKENS,
         statePath: config.channels.feishu.enabled
           ? path.join(config.channels.dataDir, "state.sqlite")
           : ":memory:",
+        guardrails,
       }),
   );
 

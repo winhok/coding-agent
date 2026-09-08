@@ -15,6 +15,15 @@ import {
   PromptSnapshotState,
   renderPromptSnapshot,
 } from "../context/prompt-builder.js";
+import type { GuardrailService } from "../guardrails/service.js";
+import {
+  safeInputRejection,
+  safeOutputReplacement,
+} from "../guardrails/service.js";
+import {
+  type GuardrailDecision,
+  InputTripwireError,
+} from "../guardrails/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import {
   type AcceptIngressResult,
@@ -22,6 +31,7 @@ import {
   ChannelStore,
   type ConversationContext,
   type OutboxEntry,
+  type QueuedTurn,
 } from "./store.js";
 import {
   type ChannelDefinition,
@@ -39,7 +49,7 @@ interface RunChannelTurnOptions {
 interface GatewayOptions {
   model: LanguageModel;
   registry: ToolRegistry;
-  createRunContext: () => AgentRunContext;
+  createRunContext: (source?: "cli" | "feishu" | "cron") => AgentRunContext;
   buildPrompt: (runContext: AgentRunContext) => PromptAssembly;
   statePath?: string;
   store?: ChannelStore;
@@ -51,6 +61,7 @@ interface GatewayOptions {
     existingSummary?: string,
   ) => Promise<CompactionResult>;
   maxConversationRuntimeStates?: number;
+  guardrails?: GuardrailService;
 }
 
 export interface ChannelInfo {
@@ -178,6 +189,26 @@ export class ChannelGateway {
       throw new Error(`Channel message denied: ${authorization.reason}`);
     }
 
+    if (this.options.guardrails) {
+      try {
+        this.options.guardrails.checkInput({
+          text: message.text,
+          source: "feishu",
+          role: "owner",
+          conversationId: message.conversationId,
+        });
+      } catch (error) {
+        if (!(error instanceof InputTripwireError)) throw error;
+        const rejected = this.store.rejectIngress(
+          channelName,
+          message,
+          safeInputRejection(),
+        );
+        if (rejected.outbox) this.scheduleDelivery(rejected.outbox);
+        return rejected;
+      }
+    }
+
     const accepted = this.store.acceptIngress(channelName, message);
     if (accepted.accepted) {
       console.log(
@@ -233,7 +264,7 @@ export class ChannelGateway {
       }
 
       try {
-        const runContext = this.options.createRunContext();
+        const runContext = this.options.createRunContext("feishu");
         const prompt = this.options.buildPrompt(runContext);
         const snapshotState = this.getPromptSnapshotState(
           turn.conversationKey,
@@ -246,6 +277,41 @@ export class ChannelGateway {
           role: "user",
           content: turn.message.text,
         };
+        let inputGuardrail: GuardrailDecision | undefined;
+        if (this.options.guardrails) {
+          try {
+            inputGuardrail = this.options.guardrails.checkInput({
+              text: turn.message.text,
+              source: "feishu",
+              role: "owner",
+              conversationId: turn.message.conversationId,
+            });
+          } catch (error) {
+            if (!(error instanceof InputTripwireError)) throw error;
+            const outbox = this.store.completeTurnWithOutbox(
+              turn,
+              [],
+              safeInputRejection(),
+              0,
+            );
+            if (outbox) this.scheduleDelivery(outbox);
+            continue;
+          }
+        }
+        if (inputGuardrail && this.options.guardrails) {
+          void this.options.guardrails
+            .checkSemanticInput(
+              {
+                text: turn.message.text,
+                source: "feishu",
+                role: "owner",
+                conversationId: turn.message.conversationId,
+              },
+              inputGuardrail,
+              runContext.signal,
+            )
+            .catch(() => undefined);
+        }
         const inputMessages = [...snapshotMessages, userMessage];
         this.store.appendTurnMessages(
           turn.conversationKey,
@@ -328,6 +394,7 @@ export class ChannelGateway {
             continue;
           }
         }
+        result = this.applyOutputGuardrail(result, turn);
         const outbox = this.store.completeTurnWithOutbox(
           turn,
           result.appendedMessages.filter(
@@ -500,11 +567,62 @@ export class ChannelGateway {
       system: options.system,
       runContext: options.runContext,
       onStepCompleted,
+      ...(this.options.guardrails
+        ? {
+            outputGuardrail: {
+              check: async (text: string) =>
+                this.options.guardrails?.checkOutput({
+                  text,
+                  source: "feishu",
+                  role: "owner",
+                }),
+              replacement: safeOutputReplacement,
+            },
+          }
+        : {}),
       eventSink: async (event) => {
         if (event.type === "tool_started") onToolActivity();
         await terminalAgentEventSink(event);
       },
     });
+  }
+
+  private applyOutputGuardrail(
+    result: AgentLoopResult,
+    turn: QueuedTurn,
+  ): AgentLoopResult {
+    if (!this.options.guardrails || result.guardrails?.output) return result;
+    const redactedMessages = this.options.guardrails.redactActivity(
+      result.appendedMessages,
+    ) as ModelMessage[];
+    const decision = this.options.guardrails.checkOutput({
+      text: result.text,
+      source: "feishu",
+      role: "owner",
+      conversationId: turn.message.conversationId,
+    });
+    if (!decision) return { ...result, appendedMessages: redactedMessages };
+    const output = {
+      outcome: decision.outcome,
+      policyVersion: decision.policyVersion,
+      requestHash: decision.requestHash,
+      durationMs: decision.durationMs,
+      categories: decision.findings.map((finding) => finding.category),
+    };
+    if (decision.outcome === "passed") {
+      return {
+        ...result,
+        appendedMessages: redactedMessages,
+        guardrails: { ...result.guardrails, output },
+      };
+    }
+    const replacement = safeOutputReplacement(decision);
+    return {
+      ...result,
+      text: replacement,
+      appendedMessages: replaceAssistantText(redactedMessages, replacement),
+      guardrails: { ...result.guardrails, output },
+    };
   }
 
   private scheduleOutbox(channelName: string): void {
@@ -615,6 +733,28 @@ export class ChannelGateway {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function replaceAssistantText(
+  messages: readonly ModelMessage[],
+  replacement: string,
+): ModelMessage[] {
+  let replaced = false;
+  const safe = messages.map((message): ModelMessage => {
+    if (message.role !== "assistant") return message;
+    replaced = true;
+    if (typeof message.content === "string") {
+      return { ...message, content: replacement };
+    }
+    return {
+      ...message,
+      content: [
+        { type: "text", text: replacement },
+        ...message.content.filter((part) => part.type !== "text"),
+      ],
+    };
+  });
+  return replaced ? safe : [{ role: "assistant", content: replacement }];
 }
 
 function timestampsForCompactedSuffix(
