@@ -75,6 +75,7 @@ describe("input guardrail coordination", () => {
     const check = deferred<GuardrailDecision>();
     const events: AgentEvent[] = [];
     const executions: string[] = [];
+    let inputCommitted = false;
     let modelCalls = 0;
     const model = new MockLanguageModelV4({
       doStream: async () => {
@@ -96,6 +97,7 @@ describe("input guardrail coordination", () => {
       },
       isReadOnly: true,
       execute: async ({ value }: { value: string }) => {
+        assert.equal(inputCommitted, true);
         executions.push(value);
         return value;
       },
@@ -108,6 +110,9 @@ describe("input guardrail coordination", () => {
       system: "test",
       runContext: createTestRunContext(registry),
       inputGuardrail: { mode: "parallel", check: async () => check.promise },
+      onInputGuardrailPassed: () => {
+        inputCommitted = true;
+      },
       eventSink: (event) => {
         events.push(event);
       },
@@ -116,6 +121,7 @@ describe("input guardrail coordination", () => {
     await waitUntil(() => modelCalls === 1);
     assert.equal(events.length, 0);
     assert.deepEqual(executions, []);
+    assert.equal(inputCommitted, false);
 
     check.resolve(PASSED);
     const result = await run;
@@ -146,6 +152,7 @@ describe("input guardrail coordination", () => {
     const events: AgentEvent[] = [];
     let executed = false;
     let approvalRequested = false;
+    let inputCommitted = false;
     const model = new MockLanguageModelV4({
       doStream: async () => toolCallStream("write-1", "mutate", {}),
     });
@@ -172,6 +179,9 @@ describe("input guardrail coordination", () => {
         },
       }),
       inputGuardrail: { mode: "parallel", check: async () => check.promise },
+      onInputGuardrailPassed: () => {
+        inputCommitted = true;
+      },
       eventSink: (event) => {
         events.push(event);
       },
@@ -187,6 +197,7 @@ describe("input guardrail coordination", () => {
     );
     assert.equal(executed, false);
     assert.equal(approvalRequested, false);
+    assert.equal(inputCommitted, false);
     assert.deepEqual(
       events.map((event) => event.type),
       ["guardrail_decision", "guardrail_terminal"],

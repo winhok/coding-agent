@@ -68,7 +68,10 @@ import {
 import { CronService } from "./cron/service.js";
 import { GuardrailAuditStore } from "./guardrails/audit.js";
 import { validatePromotionEvidence } from "./guardrails/evaluation.js";
-import { OwnerReviewManager } from "./guardrails/review.js";
+import {
+  OwnerReviewManager,
+  type ReviewRecovery,
+} from "./guardrails/review.js";
 import { extendGuardrailRunState } from "./guardrails/run-state.js";
 import {
   SemanticGuardrailResultSchema,
@@ -273,6 +276,7 @@ function createOutputGuardrail(options: {
   actorId: string;
   conversationId: string;
   requestHash?: string;
+  reviewChannel?: ReviewRecovery["channel"];
   allowReview: boolean;
   cronReview?: boolean;
 }): OutputGuardrailOptions {
@@ -307,13 +311,22 @@ function createOutputGuardrail(options: {
         }
       : options.allowReview && registry.getRole() === "owner"
         ? {
-            requestReview: (decision) => {
-              const review = ownerReviews.create(decision, {
-                actorId: options.actorId,
-                conversationId: options.conversationId,
-                requestHash: options.requestHash ?? decision.requestHash,
-                policyVersion: decision.policyVersion,
-              });
+            requestReview: ({ decision, candidate }) => {
+              const review = ownerReviews.create(
+                decision,
+                {
+                  actorId: options.actorId,
+                  conversationId: options.conversationId,
+                  requestHash: options.requestHash ?? decision.requestHash,
+                  policyVersion: decision.policyVersion,
+                },
+                {
+                  text: candidate,
+                  ...(options.reviewChannel
+                    ? { channel: options.reviewChannel }
+                    : {}),
+                },
+              );
               return {
                 ...review,
                 message:
@@ -685,16 +698,32 @@ export async function startAgent(
                 actorId,
                 conversationId,
                 requestHash,
+                conversationKey,
+                threadId,
+                replyToMessageId,
+                replyInThread,
               }: {
                 actorId: string;
                 conversationId: string;
                 requestHash: string;
+                conversationKey: string;
+                threadId?: string;
+                replyToMessageId?: string;
+                replyInThread?: boolean;
               }) =>
                 createOutputGuardrail({
                   source: "feishu",
                   actorId,
                   conversationId,
                   requestHash,
+                  reviewChannel: {
+                    channelName: "feishu",
+                    conversationKey,
+                    conversationId,
+                    ...(threadId ? { threadId } : {}),
+                    ...(replyToMessageId ? { replyToMessageId } : {}),
+                    ...(replyInThread ? { replyInThread } : {}),
+                  },
                   allowReview: true,
                 }),
               reviews: ownerReviews,
@@ -958,10 +987,52 @@ export async function startAgent(
       role: registry.getRole(),
       conversationId: config.session.id,
     };
+    const blockedResult = (
+      error: InputTripwireError,
+      tracePath = "",
+    ): CliExecutionResult => ({
+      status: "blocked",
+      answer: error.message,
+      termination: "completed",
+      stats: {
+        steps: 0,
+        toolCalls: 0,
+        retries: 0,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+      tracePath,
+      guardrails: {
+        terminal:
+          error.cancellation === "incomplete"
+            ? "cancellation_incomplete"
+            : "blocked",
+        input: {
+          outcome: error.decision.outcome,
+          policyVersion: error.decision.policyVersion,
+          requestHash: error.decision.requestHash,
+          durationMs: error.decision.durationMs,
+          categories: error.decision.findings.map(
+            (finding) => finding.category,
+          ),
+          cancellation: error.cancellation,
+        },
+      },
+    });
+    const displayInputRejection = (error: InputTripwireError) => {
+      if (options.output === "terminal") console.log(`\n${error.message}`);
+    };
+    const semanticEnforced = guardrails.isSemanticEnforced();
+    const parallelInput =
+      semanticEnforced && config.guardrails.inputMode === "parallel";
     let inputGuardrail: GuardrailDecision | undefined;
     try {
       inputGuardrail = guardrails.checkInput(normalizedGuardrailInput);
-      if (inputGuardrail && guardrails.isSemanticEnforced()) {
+      if (inputGuardrail && semanticEnforced && !parallelInput) {
         inputGuardrail = await guardrails.checkSemanticInput(
           normalizedGuardrailInput,
           inputGuardrail,
@@ -979,35 +1050,8 @@ export async function startAgent(
         outcome: "blocked",
         requestHash: error.decision.requestHash,
       });
-      return {
-        status: "blocked",
-        answer: error.message,
-        termination: "completed",
-        stats: {
-          steps: 0,
-          toolCalls: 0,
-          retries: 0,
-          usage: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheWriteTokens: 0,
-          },
-        },
-        tracePath: "",
-        guardrails: {
-          terminal: "blocked",
-          input: {
-            outcome: error.decision.outcome,
-            policyVersion: error.decision.policyVersion,
-            requestHash: error.decision.requestHash,
-            durationMs: error.decision.durationMs,
-            categories: error.decision.findings.map(
-              (finding) => finding.category,
-            ),
-          },
-        },
-      };
+      displayInputRejection(error);
+      return blockedResult(error);
     }
     const initialPolicy = resolveCliModePolicy(
       options.mode,
@@ -1035,36 +1079,59 @@ export async function startAgent(
       options.approvalMode,
     );
     const snapshotMessages = selectPromptSnapshotUpdates(promptAssembly);
-    if (snapshotMessages.length > 0) {
-      messages.push(...snapshotMessages);
-      tokenTracker.addMessages(snapshotMessages);
+    const inputMessages = [...snapshotMessages, userMsg];
+    let loopMessages = messages;
+    let provisionalCommitted = false;
+    if (parallelInput) {
+      const provisionalMessages = [...messages, ...inputMessages];
+      const provisionalTimestamps = new Map(timestamps);
       const now = Date.now();
       for (
-        let index = messages.length - snapshotMessages.length;
-        index < messages.length;
+        let index = messages.length;
+        index < provisionalMessages.length;
         index++
       ) {
-        timestamps.set(index, now);
+        provisionalTimestamps.set(index, now);
       }
-      store.appendAll(snapshotMessages);
-    }
-    messages.push(userMsg);
-    tokenTracker.addMessage(userMsg);
-    timestamps.set(messages.length - 1, Date.now());
-    store.append(userMsg);
+      loopMessages = applyDefense(
+        provisionalMessages,
+        provisionalTimestamps,
+        MODEL_CONFIG.effectiveContextWindowTokens,
+      ).messages;
+    } else {
+      if (snapshotMessages.length > 0) {
+        messages.push(...snapshotMessages);
+        tokenTracker.addMessages(snapshotMessages);
+        const now = Date.now();
+        for (
+          let index = messages.length - snapshotMessages.length;
+          index < messages.length;
+          index++
+        ) {
+          timestamps.set(index, now);
+        }
+        store.appendAll(snapshotMessages);
+      }
+      messages.push(userMsg);
+      tokenTracker.addMessage(userMsg);
+      timestamps.set(messages.length - 1, Date.now());
+      store.append(userMsg);
 
-    const turnDefense = applyDefense(
-      messages,
-      timestamps,
-      MODEL_CONFIG.effectiveContextWindowTokens,
-    );
-    replaceMessages(turnDefense.messages);
-    await compactIfNeeded();
+      const turnDefense = applyDefense(
+        messages,
+        timestamps,
+        MODEL_CONFIG.effectiveContextWindowTokens,
+      );
+      replaceMessages(turnDefense.messages);
+      await compactIfNeeded();
+      loopMessages = messages;
+    }
 
     const trace = await LocalTraceRecorder.start({
       sessionId: config.session.id,
       model: model.modelId || config.model.name,
     });
+    const initialInputGuardrail = inputGuardrail;
     let loopResult: AgentLoopResult;
     const auditStart = registry.getExecutionAuditLog().length;
     const eventSink: AgentEventSink | undefined =
@@ -1073,7 +1140,7 @@ export async function startAgent(
       loopResult = await agentLoop({
         model,
         registry,
-        messages,
+        messages: loopMessages,
         system: modePolicy.system,
         runContext,
         tracker,
@@ -1089,23 +1156,69 @@ export async function startAgent(
           if (needsFollowUp) await compactIfNeeded();
         },
         ...(eventSink ? { eventSink } : {}),
-        ...(inputGuardrail
+        ...(initialInputGuardrail
           ? {
               inputGuardrail: {
                 mode: config.guardrails.inputMode,
-                check: async () => inputGuardrail,
+                check: (signal) =>
+                  parallelInput
+                    ? guardrails.checkSemanticInput(
+                        normalizedGuardrailInput,
+                        initialInputGuardrail,
+                        signal,
+                      )
+                    : Promise.resolve(initialInputGuardrail),
                 cancellationConvergenceTimeoutMs:
                   config.guardrails.cancellationConvergenceTimeoutMs,
               },
+              ...(parallelInput
+                ? {
+                    onInputGuardrailPassed: (
+                      decision: GuardrailDecision | undefined,
+                    ) => {
+                      if (provisionalCommitted) return;
+                      store.appendAll(inputMessages);
+                      const previousMessages = messages;
+                      const previousTimestamps = new Map(timestamps);
+                      tokenTracker.replaceMessages(
+                        previousMessages,
+                        loopMessages,
+                      );
+                      messages = loopMessages;
+                      const remapped = remapMessageTimestamps(
+                        previousMessages,
+                        loopMessages,
+                        previousTimestamps,
+                      );
+                      timestamps.clear();
+                      const now = Date.now();
+                      for (
+                        let index = 0;
+                        index < loopMessages.length;
+                        index++
+                      ) {
+                        timestamps.set(index, remapped.get(index) ?? now);
+                      }
+                      if (decision) {
+                        inputGuardrail = decision;
+                        runContext.guardrailState = extendGuardrailRunState(
+                          undefined,
+                          decision,
+                        );
+                      }
+                      provisionalCommitted = true;
+                    },
+                  }
+                : {}),
             }
           : {}),
-        ...(config.guardrails.enabled && inputGuardrail
+        ...(config.guardrails.enabled && initialInputGuardrail
           ? {
               outputGuardrail: createOutputGuardrail({
                 source: "cli",
                 actorId: `cli:${config.session.id}`,
                 conversationId: config.session.id,
-                requestHash: inputGuardrail.requestHash,
+                requestHash: initialInputGuardrail.requestHash,
                 allowReview: options.mode === "interactive",
               }),
             }
@@ -1129,6 +1242,28 @@ export async function startAgent(
       }
       console.log(`  [Trace] ${trace.filePath}`);
     } catch (error) {
+      if (parallelInput && !provisionalCommitted) {
+        promptSnapshotState.restore(messages);
+      }
+      if (parallelInput && error instanceof InputTripwireError) {
+        await trace.finish(
+          error.cancellation === "incomplete"
+            ? "cancellation_incomplete"
+            : "blocked",
+          error,
+        );
+        guardrails.recordTerminal({
+          source: "cli",
+          role: registry.getRole(),
+          outcome:
+            error.cancellation === "incomplete"
+              ? "cancellation_incomplete"
+              : "blocked",
+          requestHash: error.decision.requestHash,
+        });
+        displayInputRejection(error);
+        return blockedResult(error, trace.filePath);
+      }
       await trace.finish(
         error instanceof InputTripwireError &&
           error.cancellation === "incomplete"

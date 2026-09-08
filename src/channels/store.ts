@@ -760,6 +760,81 @@ export class ChannelStore {
     return complete();
   }
 
+  enqueueReviewRecovery(input: {
+    reviewId: string;
+    channelName: string;
+    conversationKey: string;
+    conversationId: string;
+    text: string;
+    threadId?: string;
+    replyToMessageId?: string;
+    replyInThread?: boolean;
+  }): OutboxEntry {
+    const turnId = `review:${input.reviewId}`;
+    const enqueue = this.db.transaction(() => {
+      this.assertLeaseOwned();
+      const existing = this.db
+        .prepare(
+          `SELECT id, channel_name, conversation_key, turn_id, payload_json,
+                  status, attempts
+           FROM channel_outbox WHERE turn_id = ?`,
+        )
+        .get(turnId) as OutboxRow | undefined;
+      if (existing) return outboxFromRow(existing);
+
+      const id = randomUUID();
+      const message: OutgoingMessage = {
+        conversationId: input.conversationId,
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.replyToMessageId
+          ? { replyToMessageId: input.replyToMessageId }
+          : {}),
+        ...(input.replyInThread ? { replyInThread: input.replyInThread } : {}),
+        text: input.text,
+        deliveryId: id,
+      };
+      const now = Date.now();
+      this.db
+        .prepare(
+          `INSERT INTO channel_session_messages
+           (conversation_key, turn_id, position, message_json, created_at)
+           VALUES (?, ?, 0, ?, ?)`,
+        )
+        .run(
+          input.conversationKey,
+          turnId,
+          JSON.stringify({ role: "assistant", content: input.text }),
+          now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO channel_outbox
+           (id, conversation_key, turn_id, channel_name, payload_json,
+            status, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+        )
+        .run(
+          id,
+          input.conversationKey,
+          turnId,
+          input.channelName,
+          JSON.stringify(message),
+          now,
+          now,
+        );
+      return {
+        id,
+        channelName: input.channelName,
+        conversationKey: input.conversationKey,
+        turnId,
+        message,
+        status: "pending" as const,
+        attempts: 0,
+      };
+    });
+    return enqueue();
+  }
+
   failTurn(turnId: string, error: unknown): void {
     this.assertLeaseOwned();
     this.db

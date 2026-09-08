@@ -200,7 +200,7 @@ describe("tool guardrail", () => {
     ]).createToolGuardrail({ source: "cli", role: "owner" });
     const messages = [{ role: "user" as const, content: "probe" }];
 
-    await agentLoop({
+    const result = await agentLoop({
       model,
       registry,
       messages,
@@ -210,6 +210,8 @@ describe("tool guardrail", () => {
 
     assert.equal(executed, false);
     assert.doesNotMatch(JSON.stringify(messages), new RegExp(secret));
+    assert.equal(result.guardrails?.terminal, "blocked");
+    assert.equal(result.guardrails?.tool?.outcome, "blocked");
   });
 
   it("routes registered, deferred, MCP, and child-spawn tools through the same check", async () => {

@@ -118,6 +118,11 @@ export interface GuardrailDecision {
 
 export interface GuardrailSummary {
   terminal?: GuardrailTerminalOutcome;
+  tool?: {
+    outcome: "passed" | "blocked";
+    policyVersion: string;
+    categories: GuardrailCategory[];
+  };
   input?: Omit<GuardrailDecision, "findings"> & {
     categories: GuardrailCategory[];
     cancellation?: "complete" | "incomplete";

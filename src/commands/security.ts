@@ -15,21 +15,35 @@ export function createSecurityCommands(
   },
 ): CommandHandler[] {
   return [
-    (cmd, _ctx) => {
+    (cmd, ctx) => {
       const match = cmd.match(/^\/guardrail\s+approve\s+([A-Za-z0-9_-]+)$/);
       if (!match) return false;
       if (!review || registry.getRole() !== "owner") {
         console.log("\n[guardrail] 仅 Owner 可处理审批。\n");
         return true;
       }
-      const approved = review.manager.approve(match[1] ?? "", {
+      const token = match[1] ?? "";
+      const binding = {
         actorId: review.actorId,
         conversationId: review.conversationId,
         policyVersion: review.policyVersion,
-      });
+      };
+      review.manager.approve(token, binding);
+      const approved = review.manager.approvedRecovery(token, binding);
+      if (approved) {
+        const assistant = {
+          role: "assistant" as const,
+          content: approved.recovery.text,
+        };
+        ctx.sessionStore.append(assistant);
+        ctx.replaceMessages([...ctx.messages, assistant]);
+      }
+      const consumed = approved
+        ? review.manager.consume(token, approved.binding)
+        : false;
       console.log(
-        approved
-          ? "\n[guardrail] 审批已绑定到该请求；仅可消费一次。\n"
+        consumed
+          ? `\n[guardrail] 审批通过，已恢复结果：\n${approved?.recovery.text ?? ""}\n`
           : "\n[guardrail] 审批 token 无效、已使用、已过期或绑定不匹配。\n",
       );
       return true;

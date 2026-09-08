@@ -8,10 +8,23 @@ export interface ReviewBinding {
   policyVersion: string;
 }
 
+export interface ReviewRecovery {
+  text: string;
+  channel?: {
+    channelName: string;
+    conversationKey: string;
+    conversationId: string;
+    threadId?: string;
+    replyToMessageId?: string;
+    replyInThread?: boolean;
+  };
+}
+
 interface ReviewRecord extends ReviewBinding {
   tokenHash: string;
   expiresAt: number;
-  status: "pending" | "approved" | "consumed";
+  status: "pending" | "approved";
+  recovery: ReviewRecovery;
 }
 
 export interface OwnerReviewManagerOptions {
@@ -42,7 +55,9 @@ export class OwnerReviewManager {
   create(
     decision: GuardrailDecision,
     binding: ReviewBinding,
+    recovery: ReviewRecovery = { text: "" },
   ): { token: string; expiresAt: string } {
+    this.pruneExpired();
     if (!isReviewable(decision)) {
       throw new Error("Mandatory or high-risk decisions cannot be reviewed");
     }
@@ -60,6 +75,7 @@ export class OwnerReviewManager {
       ...binding,
       expiresAt,
       status: "pending",
+      recovery,
     });
     while (this.records.size > this.capacity) {
       const oldest = this.records.keys().next().value;
@@ -73,6 +89,7 @@ export class OwnerReviewManager {
     token: string,
     binding: Omit<ReviewBinding, "requestHash"> & { requestHash?: string },
   ): boolean {
+    this.pruneExpired();
     const record = this.records.get(hashToken(token));
     if (
       record?.status !== "pending" ||
@@ -90,6 +107,7 @@ export class OwnerReviewManager {
   }
 
   consume(token: string, binding: ReviewBinding): boolean {
+    this.pruneExpired();
     const tokenHash = hashToken(token);
     const record = this.records.get(tokenHash);
     if (
@@ -99,8 +117,47 @@ export class OwnerReviewManager {
     ) {
       return false;
     }
-    record.status = "consumed";
+    this.records.delete(tokenHash);
     return true;
+  }
+
+  approvedRecovery(
+    token: string,
+    binding: Omit<ReviewBinding, "requestHash"> & { requestHash?: string },
+  ):
+    | { reviewId: string; binding: ReviewBinding; recovery: ReviewRecovery }
+    | undefined {
+    this.pruneExpired();
+    const reviewId = hashToken(token);
+    const record = this.records.get(reviewId);
+    if (
+      record?.status !== "approved" ||
+      record.expiresAt <= this.now() ||
+      record.actorId !== binding.actorId ||
+      record.conversationId !== binding.conversationId ||
+      record.policyVersion !== binding.policyVersion ||
+      (binding.requestHash !== undefined &&
+        record.requestHash !== binding.requestHash)
+    ) {
+      return undefined;
+    }
+    return {
+      reviewId,
+      binding: {
+        actorId: record.actorId,
+        conversationId: record.conversationId,
+        requestHash: record.requestHash,
+        policyVersion: record.policyVersion,
+      },
+      recovery: record.recovery,
+    };
+  }
+
+  private pruneExpired(): void {
+    const now = this.now();
+    for (const [tokenHash, record] of this.records) {
+      if (record.expiresAt <= now) this.records.delete(tokenHash);
+    }
   }
 }
 

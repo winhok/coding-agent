@@ -13,7 +13,6 @@ export const SemanticGuardrailResultSchema = z.object({
   tripwire: z.boolean(),
   category: z.enum(GUARDRAIL_CATEGORIES),
   severity: z.enum(["low", "medium", "high", "critical"]),
-  ruleId: z.string().trim().min(1).max(100),
 });
 
 export type SemanticGuardrailResult = z.infer<
@@ -131,10 +130,11 @@ export class SemanticGuardrailRunner {
     signal: AbortSignal,
   ): Promise<SemanticCheckResult> {
     const startedAt = performance.now();
+    const checkId = safeClassifierId(classifier.id);
     const acquired = await this.acquire(signal);
     if (!acquired) {
       return {
-        id: classifier.id,
+        id: checkId,
         status: "queue_overflow",
         attempts: 0,
         durationMs: Math.max(0, performance.now() - startedAt),
@@ -170,11 +170,14 @@ export class SemanticGuardrailRunner {
           const parsed = SemanticGuardrailResultSchema.safeParse(raw);
           if (parsed.success) {
             return {
-              id: classifier.id,
+              id: checkId,
               status: "completed",
               attempts,
               durationMs: Math.max(0, performance.now() - startedAt),
-              decision: parsed.data,
+              decision: {
+                ...parsed.data,
+                ruleId: semanticRuleId(classifier.id),
+              },
             };
           }
           status = "malformed";
@@ -190,7 +193,7 @@ export class SemanticGuardrailRunner {
         }
       }
       return {
-        id: classifier.id,
+        id: checkId,
         status,
         attempts,
         durationMs: Math.max(0, performance.now() - startedAt),
@@ -227,6 +230,18 @@ export class SemanticGuardrailRunner {
     this.active--;
     this.queue.shift()?.();
   }
+}
+
+function safeClassifierId(id: string): string {
+  const normalized = id.replace(/[^a-zA-Z0-9_.:-]/g, "-").slice(0, 64);
+  return normalized || "semantic-classifier";
+}
+
+function semanticRuleId(classifierId: string): string {
+  return `SEMANTIC-${createHash("sha256")
+    .update(classifierId)
+    .digest("hex")
+    .slice(0, 16)}`;
 }
 
 export function unavailableSemanticResult(

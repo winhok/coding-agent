@@ -70,7 +70,9 @@ describe("owner guardrail review", () => {
       requestHash: "request-1",
       policyVersion: "policy-1",
     };
-    const first = reviews.create(reviewableDecision(), binding);
+    const first = reviews.create(reviewableDecision(), binding, {
+      text: "recovered answer",
+    });
     const handlers = createSecurityCommands(registry, new HookPipeline(), {
       manager: reviews,
       actorId: binding.actorId,
@@ -78,20 +80,32 @@ describe("owner guardrail review", () => {
       policyVersion: binding.policyVersion,
     });
 
+    const messages: Array<{ role: "assistant"; content: string }> = [];
+    const persisted: unknown[] = [];
+    const context = {
+      messages,
+      timestamps: new Map<number, number>(),
+      sessionStore: { append: (message: unknown) => persisted.push(message) },
+      replaceMessages: (next: Array<{ role: "assistant"; content: string }>) =>
+        messages.splice(0, messages.length, ...next),
+    } as unknown as CommandContext;
     assert.equal(
       handlers.some(
         (handler) =>
-          handler(`/guardrail approve ${first.token}`, {} as CommandContext) ===
-          true,
+          handler(`/guardrail approve ${first.token}`, context) === true,
       ),
       true,
     );
-    assert.equal(reviews.consume(first.token, binding), true);
+    assert.deepEqual(messages, [
+      { role: "assistant", content: "recovered answer" },
+    ]);
+    assert.equal(persisted.length, 1);
+    assert.equal(reviews.consume(first.token, binding), false);
 
     const denied = reviews.create(reviewableDecision(), binding);
     registry.setRole("collaborator");
     handlers.some((handler) =>
-      handler(`/guardrail approve ${denied.token}`, {} as CommandContext),
+      handler(`/guardrail approve ${denied.token}`, context),
     );
     assert.equal(reviews.consume(denied.token, binding), false);
   });

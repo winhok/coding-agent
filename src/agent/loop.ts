@@ -56,6 +56,9 @@ export interface AgentLoopOptions {
     check: (signal: AbortSignal) => Promise<GuardrailDecision | undefined>;
     cancellationConvergenceTimeoutMs?: number;
   };
+  onInputGuardrailPassed?: (
+    decision: GuardrailDecision | undefined,
+  ) => void | Promise<void>;
   outputGuardrail?: OutputGuardrailOptions;
 }
 
@@ -71,11 +74,10 @@ export interface OutputGuardrailOptions {
     signal: AbortSignal;
   }) => Promise<string>;
   redact?: (value: unknown) => unknown;
-  requestReview?: (decision: GuardrailDecision) => {
-    token?: string;
-    expiresAt: string;
-    message: string;
-  };
+  requestReview?: (input: {
+    decision: GuardrailDecision;
+    candidate: string;
+  }) => { token?: string; expiresAt: string; message: string };
 }
 
 const EMPTY_USAGE: StepUsage = {
@@ -90,7 +92,7 @@ const DEFAULT_CANCELLATION_CONVERGENCE_TIMEOUT_MS = 2_000;
 export async function agentLoop(
   options: AgentLoopOptions,
 ): Promise<AgentLoopResult> {
-  const { inputGuardrail, ...baseOptions } = options;
+  const { inputGuardrail, onInputGuardrailPassed, ...baseOptions } = options;
   if (!inputGuardrail) return runAgentLoopCore(baseOptions);
 
   const runController = new AbortController();
@@ -149,6 +151,7 @@ export async function agentLoop(
       targetSink,
       baseOptions.trace,
     );
+    await onInputGuardrailPassed?.(decision);
     gate.pass();
     return withInputSummary(await runAgentLoopCore(coreOptions), decision);
   }
@@ -192,6 +195,7 @@ export async function agentLoop(
       targetSink,
       baseOptions.trace,
     );
+    await onInputGuardrailPassed?.(decision);
   } catch (error) {
     gate.block(error);
     runController.abort(error);
@@ -225,11 +229,33 @@ async function runAgentLoopCore({
   maxRetries = MAX_RETRIES,
   forceFinalStep = false,
   outputGuardrail,
-}: Omit<AgentLoopOptions, "inputGuardrail">): Promise<AgentLoopResult> {
+}: Omit<
+  AgentLoopOptions,
+  "inputGuardrail" | "onInputGuardrailPassed"
+>): Promise<AgentLoopResult> {
+  let toolGuardrailSummary: GuardrailSummary["tool"];
   const runContext: AgentRunContext = {
     ...baseRunContext,
-    reportGuardrailDecision: (stage, decision) =>
-      reportGuardrailDecision(stage, decision, eventSink, trace),
+    reportGuardrailDecision: async (stage, decision) => {
+      if (stage === "tool") {
+        const categories = [
+          ...new Set([
+            ...(toolGuardrailSummary?.categories ?? []),
+            ...decision.findings.map((finding) => finding.category),
+          ]),
+        ];
+        toolGuardrailSummary = {
+          outcome:
+            decision.outcome === "blocked" ||
+            toolGuardrailSummary?.outcome === "blocked"
+              ? "blocked"
+              : "passed",
+          policyVersion: decision.policyVersion,
+          categories,
+        };
+      }
+      await reportGuardrailDecision(stage, decision, eventSink, trace);
+    },
   };
   let step = 0;
   let toolCalls = 0;
@@ -262,14 +288,13 @@ async function runAgentLoopCore({
       }
       await emit({ type: "step_started", step });
 
-      await trace?.recordStepStarted({ step, system, messages });
-
       let hasToolCall = false;
       let fullText = "";
       let shouldBreak = false;
       let stepResponse: LanguageModelResponseMetadata | undefined;
       let stepUsage: LanguageModelUsage | undefined;
       const bufferedTextEvents: Parameters<AgentEventSink>[0][] = [];
+      let traceStepStarted = false;
 
       for (let attempt = 1; ; attempt++) {
         let streamError: unknown;
@@ -407,6 +432,10 @@ async function runAgentLoopCore({
       }
       if (shouldBreak) {
         await runContext.inputEffectGate?.wait(runContext.signal);
+        if (!traceStepStarted) {
+          await trace?.recordStepStarted({ step, system, messages });
+          traceStepStarted = true;
+        }
         if (outputGuardrail) {
           const guarded = await resolveGuardedOutput(
             fullText,
@@ -441,6 +470,10 @@ async function runAgentLoopCore({
       }
 
       await runContext.inputEffectGate?.wait(runContext.signal);
+      if (!traceStepStarted) {
+        await trace?.recordStepStarted({ step, system, messages });
+        traceStepStarted = true;
+      }
 
       let responseMessages: ModelMessage[] = runContext.toolGuardrail
         ? (runContext.toolGuardrail.redact(
@@ -555,11 +588,15 @@ async function runAgentLoopCore({
     ...(outputGuardrailSummary || runContext.toolGuardrail
       ? {
           guardrails: {
-            terminal: outputGuardrailSummary?.review
-              ? "review_required"
-              : outputGuardrailSummary?.outcome === "blocked"
+            terminal:
+              toolGuardrailSummary?.outcome === "blocked"
                 ? "blocked"
-                : "passed",
+                : outputGuardrailSummary?.review
+                  ? "review_required"
+                  : outputGuardrailSummary?.outcome === "blocked"
+                    ? "blocked"
+                    : "passed",
+            ...(toolGuardrailSummary ? { tool: toolGuardrailSummary } : {}),
             ...(outputGuardrailSummary
               ? { output: outputGuardrailSummary }
               : {}),
@@ -655,6 +692,7 @@ async function resolveGuardedOutput(
   let decision = await guardrail.check(text, signal);
   if (!decision) return { text, messages, events };
   let summary = decisionSummary(decision);
+  let reviewCandidate = text;
   if (decision.outcome !== "blocked") {
     return { text, messages, events, summary, decision };
   }
@@ -667,6 +705,7 @@ async function resolveGuardedOutput(
         ruleIds: decision.findings.map((finding) => finding.ruleId),
         signal,
       });
+      reviewCandidate = repaired;
       signal.throwIfAborted();
       const repairedDecision = await guardrail.check(repaired, signal);
       if (!repairedDecision || repairedDecision.outcome === "passed") {
@@ -696,7 +735,7 @@ async function resolveGuardedOutput(
   }
 
   const review = isReviewable(decision)
-    ? guardrail.requestReview?.(decision)
+    ? guardrail.requestReview?.({ decision, candidate: reviewCandidate })
     : undefined;
   const replacement = review?.message ?? guardrail.replacement(decision);
   const historyReplacement = redactReviewToken(replacement, review?.token);

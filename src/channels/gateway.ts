@@ -75,6 +75,10 @@ interface GatewayOptions {
     actorId: string;
     conversationId: string;
     requestHash: string;
+    conversationKey: string;
+    threadId?: string;
+    replyToMessageId?: string;
+    replyInThread?: boolean;
   }) => OutputGuardrailOptions;
   reviews?: OwnerReviewManager;
   policyVersion?: string;
@@ -155,17 +159,47 @@ export class ChannelGateway {
     if (!authorization?.allowed) {
       return { accepted: false, message: "仅 Owner 可处理该审批。" };
     }
-    const accepted =
-      this.options.reviews?.approve(action.token, {
-        actorId: action.actorId,
-        conversationId: action.conversationId,
-        policyVersion: this.options.policyVersion ?? "",
-      }) ?? false;
+    const reviews = this.options.reviews;
+    const binding = {
+      actorId: action.actorId,
+      conversationId: action.conversationId,
+      policyVersion: this.options.policyVersion ?? "",
+    };
+    if (!reviews) {
+      return { accepted: false, message: "审批恢复服务不可用。" };
+    }
+    reviews.approve(action.token, binding);
+    const approved = reviews.approvedRecovery(action.token, binding);
+    const recovery = approved?.recovery.channel;
+    if (
+      !approved ||
+      !recovery ||
+      recovery.channelName !== channelName ||
+      recovery.conversationId !== action.conversationId
+    ) {
+      return { accepted: false, message: "审批已失效、已处理或绑定不匹配。" };
+    }
+    const outbox = this.store.enqueueReviewRecovery({
+      reviewId: approved.reviewId,
+      channelName: recovery.channelName,
+      conversationKey: recovery.conversationKey,
+      conversationId: recovery.conversationId,
+      text: approved.recovery.text,
+      ...(recovery.threadId ? { threadId: recovery.threadId } : {}),
+      ...(recovery.replyToMessageId
+        ? { replyToMessageId: recovery.replyToMessageId }
+        : {}),
+      ...(recovery.replyInThread
+        ? { replyInThread: recovery.replyInThread }
+        : {}),
+    });
+    const consumed = reviews.consume(action.token, approved.binding);
+    if (consumed) this.scheduleDelivery(outbox);
     return {
-      accepted,
-      message: accepted
-        ? "审批已绑定到该请求，仅可消费一次。"
-        : "审批已失效、已处理或绑定不匹配。",
+      accepted: consumed,
+      message: consumed
+        ? "审批通过，已恢复并进入投递队列。"
+        : "审批已由其他操作处理。",
     };
   }
 
@@ -404,6 +438,16 @@ export class ChannelGateway {
                 actorId: turn.message.senderId,
                 conversationId: turn.message.conversationId,
                 requestHash: inputGuardrail.requestHash,
+                conversationKey: turn.conversationKey,
+                ...(turn.message.threadId
+                  ? { threadId: turn.message.threadId }
+                  : {}),
+                ...(turn.message.replyToMessageId
+                  ? { replyToMessageId: turn.message.replyToMessageId }
+                  : {}),
+                ...(turn.message.replyInThread
+                  ? { replyInThread: turn.message.replyInThread }
+                  : {}),
               })
             : undefined;
         const inputMessages = [...snapshotMessages, userMessage];

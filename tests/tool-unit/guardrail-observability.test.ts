@@ -7,6 +7,8 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { type AgentEvent, agentLoop } from "../../src/agent/loop.ts";
 import { GuardrailAuditStore } from "../../src/guardrails/audit.ts";
+import { SemanticGuardrailRunner } from "../../src/guardrails/semantic.ts";
+import { GuardrailService } from "../../src/guardrails/service.ts";
 import type { GuardrailDecision } from "../../src/guardrails/types.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
 import { LocalTraceRecorder } from "../../src/trace/recorder.ts";
@@ -133,6 +135,49 @@ describe("guardrail observability and retention", () => {
       store.list().every((record) => record.stage === "run"),
       true,
     );
+  });
+
+  it("never persists a model-controlled semantic rule identifier", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "semantic-audit-redaction-"),
+    );
+    const file = path.join(directory, "audit.jsonl");
+    const injected = "sk-model_echoed_secret_1234567890";
+    const audit = new GuardrailAuditStore(file);
+    const semantic = new SemanticGuardrailRunner({
+      mode: "shadow",
+      timeoutMs: 100,
+      maxOutputTokens: 300,
+      retries: 0,
+      concurrency: 1,
+      queueSize: 1,
+      classifiers: [
+        {
+          id: "semantic-input",
+          classify: async () => ({
+            tripwire: true,
+            category: "prompt_injection",
+            severity: "high",
+            ruleId: injected,
+          }),
+        },
+      ],
+    });
+    const service = new GuardrailService({
+      enabled: true,
+      policyVersion: "test-v1",
+      audit,
+      semantic,
+    });
+
+    await service.checkInputWithSemantic(
+      { text: "benign input", source: "cli", role: "owner" },
+      new AbortController().signal,
+    );
+
+    const persisted = readFileSync(file, "utf8");
+    assert.doesNotMatch(persisted, new RegExp(injected));
+    assert.match(persisted, /SEMANTIC-[a-f0-9]{16}/);
   });
 });
 

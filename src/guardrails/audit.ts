@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type {
@@ -98,7 +99,21 @@ export class GuardrailAuditStore {
         ...(semantic.highestSeverity
           ? { highestSeverity: semantic.highestSeverity }
           : {}),
-        checks: semantic.checks,
+        checks: semantic.checks.map((check) => ({
+          ...check,
+          id: safeSemanticIdentifier(check.id),
+          ...(check.decision
+            ? {
+                decision: {
+                  ...check.decision,
+                  ruleId: `SEMANTIC-${createHash("sha256")
+                    .update(check.id)
+                    .digest("hex")
+                    .slice(0, 16)}`,
+                },
+              }
+            : {}),
+        })),
       },
     });
   }
@@ -219,4 +234,9 @@ export class GuardrailAuditStore {
   private metricsFile(): string | undefined {
     return this.file ? `${this.file}.metrics.json` : undefined;
   }
+}
+
+function safeSemanticIdentifier(value: string): string {
+  const normalized = value.replace(/[^a-zA-Z0-9_.:-]/g, "-").slice(0, 64);
+  return normalized || "semantic-classifier";
 }

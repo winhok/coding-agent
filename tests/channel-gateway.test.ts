@@ -172,18 +172,29 @@ describe("channel gateway", () => {
         ],
       },
       binding,
+      {
+        text: "approved result",
+        channel: {
+          channelName: "test",
+          conversationKey: "review-conversation",
+          conversationId: "chat-1",
+        },
+      },
     );
     const registry = new ToolRegistry();
+    const store = new ChannelStore(":memory:");
+    const channel = new TestChannel();
     const gateway = new ChannelGateway({
       model: {} as LanguageModel,
       registry,
       createRunContext: () => createTestRunContext(registry),
       buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
-      store: new ChannelStore(":memory:"),
+      store,
       reviews,
       policyVersion: "policy-1",
     });
-    gateway.register(new TestChannel());
+    gateway.register(channel);
+    await gateway.startAll();
 
     const denied = await gateway.handleReviewAction("test", {
       accountId: "account-1",
@@ -200,7 +211,13 @@ describe("channel gateway", () => {
 
     assert.equal(denied.accepted, false);
     assert.equal(accepted.accepted, true);
-    assert.equal(reviews.consume(review.token, binding), true);
+    await gateway.waitForIdle();
+    assert.equal(reviews.consume(review.token, binding), false);
+    assert.equal(channel.sent.at(-1)?.text, "approved result");
+    assert.match(
+      JSON.stringify(store.loadConversation("review-conversation")),
+      /approved result/,
+    );
     await gateway.stopAll();
   });
 
