@@ -16,6 +16,13 @@ export interface NormalizedGuardrailInput {
   conversationId?: string;
 }
 
+export interface NormalizedGuardrailOutput {
+  text: string;
+  source: NormalizedGuardrailInput["source"];
+  role: NormalizedGuardrailInput["role"];
+  conversationId?: string;
+}
+
 export interface GuardrailFinding {
   category: GuardrailCategory;
   severity: GuardrailSeverity;
@@ -36,6 +43,9 @@ export interface GuardrailSummary {
   input?: Omit<GuardrailDecision, "findings"> & {
     categories: GuardrailCategory[];
     cancellation?: "complete" | "incomplete";
+  };
+  output?: Omit<GuardrailDecision, "findings"> & {
+    categories: GuardrailCategory[];
   };
 }
 

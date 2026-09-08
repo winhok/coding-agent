@@ -55,6 +55,13 @@ export interface AgentLoopOptions {
     check: (signal: AbortSignal) => Promise<GuardrailDecision | undefined>;
     cancellationConvergenceTimeoutMs?: number;
   };
+  outputGuardrail?: {
+    check: (
+      text: string,
+      signal: AbortSignal,
+    ) => Promise<GuardrailDecision | undefined>;
+    replacement: (decision: GuardrailDecision) => string;
+  };
 }
 
 const EMPTY_USAGE: StepUsage = {
@@ -153,6 +160,7 @@ async function runAgentLoopCore({
   maxSteps = MAX_STEPS,
   maxRetries = MAX_RETRIES,
   forceFinalStep = false,
+  outputGuardrail,
 }: Omit<AgentLoopOptions, "inputGuardrail">): Promise<AgentLoopResult> {
   let step = 0;
   let toolCalls = 0;
@@ -161,6 +169,7 @@ async function runAgentLoopCore({
   let termination: AgentLoopTermination | undefined;
   const totalUsage = { ...EMPTY_USAGE };
   const appendedMessages: ModelMessage[] = [];
+  let outputGuardrailSummary: GuardrailSummary["output"];
   const loopDetector = new ToolLoopDetector();
   const emit = async (event: Parameters<AgentEventSink>[0]) => {
     await eventSink?.(event);
@@ -191,6 +200,7 @@ async function runAgentLoopCore({
       let shouldBreak = false;
       let stepResponse: LanguageModelResponseMetadata | undefined;
       let stepUsage: LanguageModelUsage | undefined;
+      const bufferedTextEvents: Parameters<AgentEventSink>[0][] = [];
 
       for (let attempt = 1; ; attempt++) {
         let streamError: unknown;
@@ -212,7 +222,15 @@ async function runAgentLoopCore({
           for await (const part of result.stream) {
             switch (part.type) {
               case "text-delta":
-                await emit({ type: "text_delta", step, text: part.text });
+                if (outputGuardrail) {
+                  bufferedTextEvents.push({
+                    type: "text_delta",
+                    step,
+                    text: part.text,
+                  });
+                } else {
+                  await emit({ type: "text_delta", step, text: part.text });
+                }
                 fullText += part.text;
                 break;
 
@@ -307,9 +325,31 @@ async function runAgentLoopCore({
           hasToolCall = false;
           fullText = "";
           shouldBreak = false;
+          bufferedTextEvents.length = 0;
         }
       }
       if (shouldBreak) {
+        await runContext.inputEffectGate?.wait(runContext.signal);
+        if (outputGuardrail) {
+          const decision = await outputGuardrail.check(
+            fullText,
+            runContext.signal,
+          );
+          if (decision) {
+            if (!outputGuardrailSummary || decision.outcome === "blocked") {
+              outputGuardrailSummary = decisionSummary(decision);
+            }
+            if (decision.outcome === "blocked") {
+              fullText = outputGuardrail.replacement(decision);
+              bufferedTextEvents.splice(0, bufferedTextEvents.length, {
+                type: "text_delta",
+                step,
+                text: fullText,
+              });
+            }
+          }
+          await flushEvents(bufferedTextEvents, eventSink);
+        }
         finalText = fullText;
         termination = "loop_detected";
         break;
@@ -323,7 +363,29 @@ async function runAgentLoopCore({
 
       await runContext.inputEffectGate?.wait(runContext.signal);
 
-      const responseMessages = stepResponse.messages;
+      let responseMessages: ModelMessage[] = stepResponse.messages;
+      if (outputGuardrail) {
+        const decision = await outputGuardrail.check(
+          fullText,
+          runContext.signal,
+        );
+        if (decision) {
+          if (!outputGuardrailSummary || decision.outcome === "blocked") {
+            outputGuardrailSummary = decisionSummary(decision);
+          }
+          if (decision.outcome === "blocked") {
+            fullText = outputGuardrail.replacement(decision);
+            responseMessages = replaceAssistantText(responseMessages, fullText);
+            bufferedTextEvents.splice(0, bufferedTextEvents.length, {
+              type: "text_delta",
+              step,
+              text: fullText,
+            });
+          }
+        }
+      }
+      await flushEvents(bufferedTextEvents, eventSink);
+
       messages.push(...responseMessages);
       appendedMessages.push(...responseMessages);
 
@@ -382,6 +444,9 @@ async function runAgentLoopCore({
     text: finalText,
     termination,
     stats,
+    ...(outputGuardrailSummary
+      ? { guardrails: { output: outputGuardrailSummary } }
+      : {}),
   };
   await emit({ type: "run_finished", result });
   return result;
@@ -427,6 +492,42 @@ function withInputSummary(
     categories: decision.findings.map((finding) => finding.category),
   };
   return { ...result, guardrails: { ...result.guardrails, input } };
+}
+
+function decisionSummary(
+  decision: GuardrailDecision,
+): NonNullable<GuardrailSummary["output"]> {
+  return {
+    outcome: decision.outcome,
+    policyVersion: decision.policyVersion,
+    requestHash: decision.requestHash,
+    durationMs: decision.durationMs,
+    categories: decision.findings.map((finding) => finding.category),
+  };
+}
+
+function replaceAssistantText(
+  messages: ModelMessage[],
+  replacement: string,
+): ModelMessage[] {
+  let replaced = false;
+  const safeMessages = messages.map((message): ModelMessage => {
+    if (message.role !== "assistant") return message;
+    replaced = true;
+    if (typeof message.content === "string") {
+      return { ...message, content: replacement };
+    }
+    return {
+      ...message,
+      content: [
+        { type: "text", text: replacement },
+        ...message.content.filter((part) => part.type !== "text"),
+      ],
+    };
+  });
+  return replaced
+    ? safeMessages
+    : [{ role: "assistant", content: replacement }, ...safeMessages];
 }
 
 export type {

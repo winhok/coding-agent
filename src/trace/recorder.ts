@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import type { ModelMessage } from "ai";
 import type { StepUsage } from "../usage/tracker.js";
 
-type TraceStatus = "completed" | "failed" | "cancelled";
+type TraceStatus = "completed" | "failed" | "cancelled" | "blocked";
 
 interface TraceOptions {
   directory?: string;

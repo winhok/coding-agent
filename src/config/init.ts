@@ -98,6 +98,7 @@ export async function runInit(): Promise<void> {
       auditFile: ".guardrails/audit.jsonl",
       auditCapacity: 1_000,
       mandatoryRules: true,
+      sensitiveFields: [],
       inputMode: "parallel",
       cancellationConvergenceTimeoutMs: 2_000,
     },

@@ -66,7 +66,10 @@ import {
 } from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
 import { GuardrailAuditStore } from "./guardrails/audit.js";
-import { GuardrailService } from "./guardrails/service.js";
+import {
+  GuardrailService,
+  safeOutputReplacement,
+} from "./guardrails/service.js";
 import {
   type GuardrailDecision,
   InputTripwireError,
@@ -108,11 +111,6 @@ const guardrailAudit = new GuardrailAuditStore(
   config.guardrails.auditFile,
   config.guardrails.auditCapacity,
 );
-const guardrails = new GuardrailService({
-  enabled: config.guardrails.enabled,
-  policyVersion: config.guardrails.policyVersion,
-  audit: guardrailAudit,
-});
 
 const MODEL_CONFIG = {
   id: config.model.name,
@@ -144,6 +142,15 @@ function createModel(modelConfig: SuperAgentConfig["model"], apiKey: string) {
 }
 
 const apiKey = resolveApiKey(config.model);
+const guardrails = new GuardrailService({
+  enabled: config.guardrails.enabled,
+  policyVersion: config.guardrails.policyVersion,
+  audit: guardrailAudit,
+  knownSecrets: [apiKey, config.channels.feishu.appSecret].filter(
+    (secret) => secret.length >= 4,
+  ),
+  sensitiveFields: config.guardrails.sensitiveFields,
+});
 const model = createModel(config.model, apiKey);
 
 const registry = new ToolRegistry();
@@ -800,9 +807,27 @@ export async function startAgent(
               },
             }
           : {}),
+        ...(config.guardrails.enabled
+          ? {
+              outputGuardrail: {
+                check: async (text: string) =>
+                  guardrails.checkOutput({
+                    text,
+                    source: "cli",
+                    role: registry.getRole(),
+                    conversationId: config.session.id,
+                  }),
+                replacement: safeOutputReplacement,
+              },
+            }
+          : {}),
         trace,
       });
-      await trace.finish("completed");
+      await trace.finish(
+        loopResult.guardrails?.output?.outcome === "blocked"
+          ? "blocked"
+          : "completed",
+      );
       console.log(`  [Trace] ${trace.filePath}`);
     } catch (error) {
       await trace.finish("failed", error);
@@ -827,31 +852,20 @@ export async function startAgent(
       .some(
         (entry) => entry.outcome === "denied" || entry.outcome === "blocked",
       );
+    const outputBlocked = loopResult.guardrails?.output?.outcome === "blocked";
     return {
-      status: policyDenied
-        ? "permission_denied"
-        : loopResult.termination === "completed"
-          ? "completed"
-          : "incomplete",
+      status: outputBlocked
+        ? "blocked"
+        : policyDenied
+          ? "permission_denied"
+          : loopResult.termination === "completed"
+            ? "completed"
+            : "incomplete",
       answer: loopResult.text || "(无输出)",
       termination: loopResult.termination,
       stats: loopResult.stats,
       tracePath: trace.filePath,
-      ...(inputGuardrail
-        ? {
-            guardrails: {
-              input: {
-                outcome: inputGuardrail.outcome,
-                policyVersion: inputGuardrail.policyVersion,
-                requestHash: inputGuardrail.requestHash,
-                durationMs: inputGuardrail.durationMs,
-                categories: inputGuardrail.findings.map(
-                  (finding) => finding.category,
-                ),
-              },
-            },
-          }
-        : {}),
+      ...(loopResult.guardrails ? { guardrails: loopResult.guardrails } : {}),
     };
   }
 

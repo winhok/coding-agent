@@ -200,6 +200,15 @@ export const GuardrailConfigSchema = z.object({
   auditFile: z.string().trim().min(1).default(".guardrails/audit.jsonl"),
   auditCapacity: z.number().int().positive().max(100_000).default(1_000),
   mandatoryRules: z.literal(true).default(true),
+  sensitiveFields: z
+    .array(
+      z
+        .string()
+        .trim()
+        .regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/),
+    )
+    .max(100)
+    .default([]),
   inputMode: z.enum(["blocking", "parallel"]).default("parallel"),
   cancellationConvergenceTimeoutMs: z
     .number()

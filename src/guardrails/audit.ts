@@ -1,9 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { GuardrailDecision, NormalizedGuardrailInput } from "./types.js";
+import type {
+  GuardrailDecision,
+  NormalizedGuardrailInput,
+  NormalizedGuardrailOutput,
+} from "./types.js";
 
 export interface GuardrailAuditRecord {
   timestamp: string;
+  stage: "input" | "output";
   source: NormalizedGuardrailInput["source"];
   role: NormalizedGuardrailInput["role"];
   outcome: GuardrailDecision["outcome"];
@@ -21,9 +26,14 @@ export class GuardrailAuditStore {
     private readonly capacity = 1_000,
   ) {}
 
-  append(input: NormalizedGuardrailInput, decision: GuardrailDecision): void {
+  append(
+    input: NormalizedGuardrailInput | NormalizedGuardrailOutput,
+    decision: GuardrailDecision,
+    stage: GuardrailAuditRecord["stage"] = "input",
+  ): void {
     const record: GuardrailAuditRecord = {
       timestamp: new Date().toISOString(),
+      stage,
       source: input.source,
       role: input.role,
       outcome: decision.outcome,
