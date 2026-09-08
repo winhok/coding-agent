@@ -194,6 +194,14 @@ export const UsageConfigSchema = z.object({
   trackingFile: z.string().default(".usage/today.jsonl"),
 });
 
+export const GuardrailConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  policyVersion: z.string().trim().min(1).default("1.0"),
+  auditFile: z.string().trim().min(1).default(".guardrails/audit.jsonl"),
+  auditCapacity: z.number().int().positive().max(100_000).default(1_000),
+  mandatoryRules: z.literal(true).default(true),
+});
+
 export const SuperAgentConfigSchema = z.object({
   version: z.string().default("1.0"),
   model: ModelConfigSchema.prefault({}),
@@ -207,6 +215,7 @@ export const SuperAgentConfigSchema = z.object({
   cron: CronConfigSchema.prefault({}),
   session: SessionConfigSchema.prefault({}),
   usage: UsageConfigSchema.prefault({}),
+  guardrails: GuardrailConfigSchema.prefault({}),
 });
 
 export type SuperAgentConfig = z.infer<typeof SuperAgentConfigSchema>;

@@ -30,6 +30,8 @@ describe("config", () => {
     ]);
     assert.equal(config.rag.enabled, true);
     assert.deepEqual(config.mcp.servers, []);
+    assert.equal(config.guardrails.enabled, true);
+    assert.equal(config.guardrails.mandatoryRules, true);
   });
 
   it("accepts capability-driven role policies with optional tool exceptions", () => {

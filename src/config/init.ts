@@ -92,6 +92,13 @@ export async function runInit(): Promise<void> {
     cron: { enabled: true, dataDir: "." },
     session: { id: "default" },
     usage: { trackingFile: ".usage/today.jsonl" },
+    guardrails: {
+      enabled: true,
+      policyVersion: "1.0",
+      auditFile: ".guardrails/audit.jsonl",
+      auditCapacity: 1_000,
+      mandatoryRules: true,
+    },
   };
 
   fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`);

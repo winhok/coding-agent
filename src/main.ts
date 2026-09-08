@@ -65,6 +65,12 @@ import {
   repositoryRules,
 } from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
+import { GuardrailAuditStore } from "./guardrails/audit.js";
+import { GuardrailService } from "./guardrails/service.js";
+import {
+  type GuardrailDecision,
+  InputTripwireError,
+} from "./guardrails/types.js";
 import { MemoryStore } from "./memory/store.js";
 import { PluginManager } from "./plugins/manager.js";
 import type { PluginDefinition } from "./plugins/types.js";
@@ -98,6 +104,15 @@ import { promptTokensFromUsage, UsageTracker } from "./usage/tracker.js";
 
 // ── 加载配置 ────────────────────────────────
 const config = loadConfig();
+const guardrailAudit = new GuardrailAuditStore(
+  config.guardrails.auditFile,
+  config.guardrails.auditCapacity,
+);
+const guardrails = new GuardrailService({
+  enabled: config.guardrails.enabled,
+  policyVersion: config.guardrails.policyVersion,
+  audit: guardrailAudit,
+});
 
 const MODEL_CONFIG = {
   id: config.model.name,
@@ -662,6 +677,52 @@ export async function startAgent(
   async function executeUserTurn(
     userMsg: ModelMessage,
   ): Promise<CliExecutionResult> {
+    const inputText =
+      typeof userMsg.content === "string"
+        ? userMsg.content
+        : userMsg.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+    let inputGuardrail: GuardrailDecision | undefined;
+    try {
+      inputGuardrail = guardrails.checkInput({
+        text: inputText,
+        source: "cli",
+        role: registry.getRole(),
+        conversationId: config.session.id,
+      });
+    } catch (error) {
+      if (!(error instanceof InputTripwireError)) throw error;
+      return {
+        status: "blocked",
+        answer: error.message,
+        termination: "completed",
+        stats: {
+          steps: 0,
+          toolCalls: 0,
+          retries: 0,
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+        tracePath: "",
+        guardrails: {
+          input: {
+            outcome: error.decision.outcome,
+            policyVersion: error.decision.policyVersion,
+            requestHash: error.decision.requestHash,
+            durationMs: error.decision.durationMs,
+            categories: error.decision.findings.map(
+              (finding) => finding.category,
+            ),
+          },
+        },
+      };
+    }
     const initialPolicy = resolveCliModePolicy(
       options.mode,
       builder.assemble(makePromptCtx()).system,
@@ -766,6 +827,21 @@ export async function startAgent(
       termination: loopResult.termination,
       stats: loopResult.stats,
       tracePath: trace.filePath,
+      ...(inputGuardrail
+        ? {
+            guardrails: {
+              input: {
+                outcome: inputGuardrail.outcome,
+                policyVersion: inputGuardrail.policyVersion,
+                requestHash: inputGuardrail.requestHash,
+                durationMs: inputGuardrail.durationMs,
+                categories: inputGuardrail.findings.map(
+                  (finding) => finding.category,
+                ),
+              },
+            },
+          }
+        : {}),
     };
   }
 

@@ -11,7 +11,7 @@ export const CLI_EXIT = {
 } as const;
 
 export interface CliExecutionResult {
-  status: "completed" | "incomplete" | "permission_denied";
+  status: "completed" | "incomplete" | "permission_denied" | "blocked";
   answer: string;
   termination: "completed" | "loop_detected" | "max_steps";
   stats: {
@@ -26,6 +26,7 @@ export interface CliExecutionResult {
     };
   };
   tracePath: string;
+  guardrails?: import("../guardrails/types.js").GuardrailSummary;
 }
 
 export interface CliIO {
@@ -111,6 +112,7 @@ export async function runCli(
     if (result.status === "permission_denied") {
       return CLI_EXIT.permissionDenied;
     }
+    if (result.status === "blocked") return CLI_EXIT.permissionDenied;
     if (result.status === "incomplete") return CLI_EXIT.incomplete;
     return CLI_EXIT.success;
   } catch (error) {

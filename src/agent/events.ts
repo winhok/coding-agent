@@ -15,6 +15,7 @@ export interface AgentLoopResult {
   text: string;
   termination: AgentLoopTermination;
   stats: AgentLoopStats;
+  guardrails?: import("../guardrails/types.js").GuardrailSummary;
 }
 
 export type AgentEvent =

@@ -23,6 +23,7 @@ pids
 .memory/
 .usage/
 .traces/
+.guardrails/
 .cron/
 knowledge.db
 knowledge.db-shm
