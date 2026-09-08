@@ -292,7 +292,7 @@ registry.setRole(config.security.defaultRole);
 
 // ── Cron Service ────────────────────────────────
 const cronService = config.cron.enabled
-  ? new CronService(config.cron.dataDir)
+  ? new CronService(config.cron.dataDir, { guardrails })
   : undefined;
 if (cronService) registry.register(createCronTool(cronService));
 
@@ -506,13 +506,14 @@ export async function startAgent(
     selection?: ToolSelection,
     signal: AbortSignal = runtimeController.signal,
     source: "cli" | "feishu" | "cron" = "cli",
+    allowApproval = true,
   ): AgentRunContext {
     return createAgentRunContext(workingDir, {
       agentId: "root",
       signal,
       toolView: registry.createView(selection),
       skillView: skillLoader.createView(),
-      requestApproval,
+      ...(allowApproval ? { requestApproval } : {}),
       ...(config.guardrails.enabled
         ? {
             toolGuardrail: guardrails.createToolGuardrail({
@@ -649,7 +650,12 @@ export async function startAgent(
     cronService.load();
     cronService.setExecutor({
       runAgentPrompt: async (prompt) => {
-        const runContext = createRunContext();
+        const runContext = createRunContext(
+          undefined,
+          runtimeController.signal,
+          "cron",
+          false,
+        );
         const promptAssembly = buildPromptFor(runContext);
         const cronMessages: ModelMessage[] = [
           ...promptAssembly.snapshots
@@ -657,26 +663,34 @@ export async function startAgent(
             .map(renderPromptSnapshot),
           { role: "user", content: prompt },
         ];
-        await agentLoop({
+        const result = await agentLoop({
           model,
           registry,
           messages: cronMessages,
           system: promptAssembly.system,
           runContext,
+          ...(config.guardrails.enabled
+            ? {
+                outputGuardrail: {
+                  check: async (text: string) =>
+                    guardrails.checkOutput({
+                      text,
+                      source: "cron",
+                      role: registry.getRole(),
+                    }),
+                  replacement: safeOutputReplacement,
+                },
+              }
+            : {}),
           eventSink: terminalAgentEventSink,
         });
-        const lastMessage = cronMessages[cronMessages.length - 1];
-        if (!lastMessage) return "(无输出)";
-        if (typeof lastMessage.content === "string") return lastMessage.content;
-        if (Array.isArray(lastMessage.content)) {
-          return (
-            lastMessage.content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join("") || "(无输出)"
-          );
-        }
-        return String(lastMessage.content);
+        return {
+          status:
+            result.guardrails?.output?.outcome === "blocked"
+              ? "blocked"
+              : "completed",
+          output: result.text || "(无输出)",
+        };
       },
       notify: (message) => {
         console.log(`\n${message}`);

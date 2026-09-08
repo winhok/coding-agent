@@ -1,3 +1,12 @@
+import type { GuardrailService } from "../guardrails/service.js";
+import {
+  safeCronInputRejection,
+  safeOutputReplacement,
+} from "../guardrails/service.js";
+import {
+  type GuardrailDecision,
+  InputTripwireError,
+} from "../guardrails/types.js";
 import { getNextCronTime, parseSchedule } from "./parser.js";
 import { CronStore } from "./store.js";
 import type {
@@ -21,8 +30,16 @@ const QUOTES = [
 ];
 
 export interface CronExecutor {
-  runAgentPrompt: (prompt: string, timeout?: number) => Promise<string>;
+  runAgentPrompt: (
+    prompt: string,
+    timeout?: number,
+  ) => Promise<string | CronAgentExecutionResult>;
   notify?: (message: string) => void;
+}
+
+export interface CronAgentExecutionResult {
+  status: "completed" | "blocked" | "review_required";
+  output: string;
 }
 
 export class CronService {
@@ -31,7 +48,10 @@ export class CronService {
   private executor?: CronExecutor;
   private running = false;
 
-  constructor(baseDir = ".") {
+  constructor(
+    baseDir = ".",
+    private readonly options: { guardrails?: GuardrailService } = {},
+  ) {
     this.store = new CronStore(baseDir);
     this.store.init();
   }
@@ -44,11 +64,13 @@ export class CronService {
     const configs = this.store.loadJobs();
     for (const config of configs) {
       if (config.enabled) {
+        const pause = this.store.getPause(config.id);
         this.jobs.set(config.id, {
           config,
           timerId: null,
           consecutiveFailures: 0,
           running: false,
+          ...(pause ? { pause } : {}),
         });
       }
     }
@@ -58,7 +80,7 @@ export class CronService {
     if (this.running) return;
     this.running = true;
     for (const state of this.jobs.values()) {
-      if (state.config.enabled) this.scheduleJob(state);
+      if (state.config.enabled && !state.pause) this.scheduleJob(state);
     }
   }
 
@@ -92,6 +114,7 @@ export class CronService {
     if (!state) return false;
     if (state.timerId) clearTimeout(state.timerId);
     this.jobs.delete(id);
+    this.store.clearPause(id);
     this.persist();
     return true;
   }
@@ -101,6 +124,8 @@ export class CronService {
     if (!state) return false;
     state.config.enabled = true;
     state.consecutiveFailures = 0;
+    delete state.pause;
+    this.store.clearPause(id);
     this.persist();
     if (this.running) this.scheduleJob(state);
     return true;
@@ -123,11 +148,13 @@ export class CronService {
       config: state.config,
       status: state.running
         ? "running"
-        : !state.config.enabled
-          ? "disabled"
-          : state.timerId
-            ? "scheduled"
-            : "idle",
+        : state.pause
+          ? "paused"
+          : !state.config.enabled
+            ? "disabled"
+            : state.timerId
+              ? "scheduled"
+              : "idle",
       ...(state.lastRun ? { lastRun: state.lastRun } : {}),
     }));
   }
@@ -135,6 +162,7 @@ export class CronService {
   async runNow(id: string): Promise<string> {
     const state = this.jobs.get(id);
     if (!state) return `任务 ${id} 不存在`;
+    if (state.pause) return `任务 ${id} 已暂停: ${state.pause.reason}`;
     return this.executeJob(state);
   }
 
@@ -163,7 +191,9 @@ export class CronService {
           if (!parsed.onceAt) throw new Error("无效的 once 调度");
           const diff = parsed.onceAt.getTime() - Date.now();
           if (diff <= 0) {
-            void this.executeJob(state);
+            void this.executeJob(state).then(() => {
+              if (!state.pause) this.remove(state.config.id);
+            });
             return;
           }
           delayMs = diff;
@@ -178,9 +208,14 @@ export class CronService {
 
       state.timerId = setTimeout(async () => {
         await this.executeJob(state);
-        if (parsed.type !== "once" && state.config.enabled && this.running) {
+        if (
+          parsed.type !== "once" &&
+          state.config.enabled &&
+          !state.pause &&
+          this.running
+        ) {
           this.scheduleJob(state);
-        } else if (parsed.type === "once") {
+        } else if (parsed.type === "once" && !state.pause) {
           this.remove(state.config.id);
         }
       }, delayMs);
@@ -201,13 +236,30 @@ export class CronService {
 
     try {
       const timeout = state.config.timeout || 60000;
-      output = await this.runPayload(state.config.payload, timeout);
-      state.consecutiveFailures = 0;
+      const result = await this.runPayload(state.config.payload, timeout);
+      output = result.output;
+      if (result.status === "completed") {
+        state.consecutiveFailures = 0;
+        delete state.pause;
+        this.store.clearPause(state.config.id);
+      } else {
+        status = result.status;
+        state.consecutiveFailures = 0;
+        state.pause = {
+          status: result.status,
+          reason: output,
+          updatedAt: new Date().toISOString(),
+        };
+        this.store.setPause(state.config.id, state.pause);
+      }
     } catch (caughtError) {
-      const message =
+      const rawMessage =
         caughtError instanceof Error
           ? caughtError.message
           : String(caughtError);
+      const message = String(
+        this.options.guardrails?.redactActivity(rawMessage) ?? rawMessage,
+      );
       status = message.includes("timeout") ? "timeout" : "error";
       error = message;
       output = `执行失败: ${message}`;
@@ -237,7 +289,12 @@ export class CronService {
     this.store.appendLog(log);
 
     if (this.executor?.notify) {
-      const icon = status === "success" ? "✓" : "✗";
+      const icon =
+        status === "success"
+          ? "✓"
+          : status === "error" || status === "timeout"
+            ? "✗"
+            : "!";
       this.executor.notify(
         `[cron] ${icon} ${state.config.name}: ${output.slice(0, 200)}`,
       );
@@ -249,23 +306,87 @@ export class CronService {
   private async runPayload(
     payload: JobPayload,
     timeout: number,
-  ): Promise<string> {
+  ): Promise<CronAgentExecutionResult> {
     if (!this.executor) {
-      return "[cron] 未设置执行器，无法运行任务";
+      return {
+        status: "completed",
+        output: "[cron] 未设置执行器，无法运行任务",
+      };
     }
 
     if (payload.type === "agent") {
-      return this.executor.runAgentPrompt(payload.prompt, timeout);
+      let deterministic: GuardrailDecision | undefined;
+      if (this.options.guardrails) {
+        try {
+          deterministic = this.options.guardrails.checkInput({
+            text: payload.prompt,
+            source: "cron",
+            role: "owner",
+          });
+        } catch (error) {
+          if (!(error instanceof InputTripwireError)) throw error;
+          return {
+            status: "blocked",
+            output: safeCronInputRejection(error.decision),
+          };
+        }
+        if (deterministic) {
+          void this.options.guardrails
+            .checkSemanticInput(
+              { text: payload.prompt, source: "cron", role: "owner" },
+              deterministic,
+              new AbortController().signal,
+            )
+            .catch(() => undefined);
+        }
+      }
+      const raw = await this.executor.runAgentPrompt(payload.prompt, timeout);
+      const result =
+        typeof raw === "string"
+          ? { status: "completed" as const, output: raw }
+          : raw;
+      if (result.status === "review_required") {
+        return {
+          status: "review_required",
+          output: "定时任务需要 Owner 审批，已暂停等待人工处理。",
+        };
+      }
+      if (result.status === "blocked") {
+        return {
+          status: "blocked",
+          output: String(
+            this.options.guardrails?.redactActivity(result.output) ??
+              result.output,
+          ),
+        };
+      }
+      if (!this.options.guardrails) {
+        return result;
+      }
+      const outputDecision = this.options.guardrails.checkOutput({
+        text: result.output,
+        source: "cron",
+        role: "owner",
+      });
+      return outputDecision?.outcome === "blocked"
+        ? { status: "blocked", output: safeOutputReplacement(outputDecision) }
+        : result;
     }
 
     if (payload.type === "handler") {
       if (payload.handler === "random-quote") {
-        return QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? "";
+        return {
+          status: "completed",
+          output: QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? "",
+        };
       }
-      return `[handler] ${payload.handler} — handler 类型需要通过插件注册`;
+      return {
+        status: "completed",
+        output: `[handler] ${payload.handler} — handler 类型需要通过插件注册`,
+      };
     }
 
-    return "未知 payload 类型";
+    return { status: "completed", output: "未知 payload 类型" };
   }
 
   private persist(): void {

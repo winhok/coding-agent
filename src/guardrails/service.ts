@@ -139,6 +139,17 @@ export function safeInputRejection(): string {
   return "该消息触发了安全保护，未交给智能助手处理。请移除敏感信息、越权或绕过内容后重试。";
 }
 
+export function safeCronInputRejection(decision: GuardrailDecision): string {
+  const category = decision.findings[0]?.category;
+  if (category === "sensitive_data") {
+    return "定时任务包含敏感信息，已被安全保护暂停。";
+  }
+  if (category === "unsafe_action") {
+    return "定时任务包含不安全操作，已被安全保护暂停。";
+  }
+  return "定时任务违反当前安全策略，已被安全保护暂停。";
+}
+
 function safeToolRejection(_decision: GuardrailDecision): string {
   return "该工具调用触发了安全保护，未执行。请移除敏感信息、越界路径或绕过内容后重试。";
 }

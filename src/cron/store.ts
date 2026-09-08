@@ -1,8 +1,9 @@
 import fs from "node:fs";
-import type { CronJobConfig, RunLog } from "./types.js";
+import type { CronJobConfig, CronPauseState, RunLog } from "./types.js";
 
 const JOBS_FILE = ".cron/jobs.json";
 const LOGS_FILE = ".cron/logs.jsonl";
+const STATES_FILE = ".cron/states.json";
 
 export class CronStore {
   constructor(private baseDir: string = ".") {}
@@ -13,6 +14,10 @@ export class CronStore {
 
   private get logsPath() {
     return `${this.baseDir}/${LOGS_FILE}`;
+  }
+
+  private get statesPath() {
+    return `${this.baseDir}/${STATES_FILE}`;
   }
 
   init(): void {
@@ -59,5 +64,39 @@ export class CronStore {
 
     if (jobId) logs = logs.filter((log) => log.jobId === jobId);
     return logs.slice(-limit);
+  }
+
+  getPause(jobId: string): CronPauseState | undefined {
+    return this.loadPauses()[jobId];
+  }
+
+  setPause(jobId: string, pause: CronPauseState): void {
+    const states = this.loadPauses();
+    states[jobId] = pause;
+    this.savePauses(states);
+  }
+
+  clearPause(jobId: string): void {
+    const states = this.loadPauses();
+    if (!(jobId in states)) return;
+    delete states[jobId];
+    this.savePauses(states);
+  }
+
+  private loadPauses(): Record<string, CronPauseState> {
+    if (!fs.existsSync(this.statesPath)) return {};
+    try {
+      return JSON.parse(fs.readFileSync(this.statesPath, "utf8")) as Record<
+        string,
+        CronPauseState
+      >;
+    } catch {
+      return {};
+    }
+  }
+
+  private savePauses(states: Record<string, CronPauseState>): void {
+    this.init();
+    fs.writeFileSync(this.statesPath, JSON.stringify(states, null, 2));
   }
 }

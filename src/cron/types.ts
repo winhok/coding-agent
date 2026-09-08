@@ -21,9 +21,15 @@ export interface RunLog {
   jobId: string; // 所属任务 ID
   startedAt: string; // 开始时间 ISO 字符串
   finishedAt: string; // 结束时间 ISO 字符串
-  status: "success" | "error" | "timeout"; // 执行结果
+  status: "success" | "error" | "timeout" | "blocked" | "review_required"; // 执行结果
   output?: string; // 执行输出（截断到 1000 字符）
   error?: string; // 错误信息
+}
+
+export interface CronPauseState {
+  status: "blocked" | "review_required";
+  reason: string;
+  updatedAt: string;
 }
 
 export interface CronJobState {
@@ -32,4 +38,5 @@ export interface CronJobState {
   lastRun?: RunLog; // 上一次执行记录
   consecutiveFailures: number; // 连续失败计数
   running: boolean; // 是否正在执行中
+  pause?: CronPauseState; // 持久化的安全暂停状态
 }
