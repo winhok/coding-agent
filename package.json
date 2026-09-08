@@ -24,31 +24,31 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "packageManager": "pnpm@11.20.0",
+  "packageManager": "pnpm@12.3.4",
   "devDependencies": {
-    "@biomejs/biome": "2.5.7",
+    "@biomejs/biome": "2.5.12",
     "@types/better-sqlite3": "^9.6.0",
     "@types/json-schema": "^7.0.15",
-    "@types/node": "^26.2.0",
-    "lefthook": "^2.1.10",
-    "tsx": "^4.23.11",
+    "@types/node": "^26.5.0",
+    "lefthook": "^2.1.12",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.35",
-    "@ai-sdk/openai": "^4.0.35",
-    "@larksuiteoapi/node-sdk": "^1.72.0",
+    "@ai-sdk/anthropic": "^4.0.50",
+    "@ai-sdk/openai": "^4.0.62",
+    "@larksuiteoapi/node-sdk": "^1.73.3",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "ai": "^7.0.57",
+    "ai": "^7.0.94",
     "ajv": "^8.20.0",
     "better-sqlite3": "^13.0.3",
     "croner": "^10.0.1",
     "dedent": "^1.7.2",
     "dotenv": "^17.4.2",
     "fast-glob": "^3.3.3",
-    "globby": "^16.2.3",
-    "openai": "^7.4.0",
+    "globby": "^16.2.4",
+    "openai": "^7.10.0",
     "sqlite-vec": "^0.1.9",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   }
 }
