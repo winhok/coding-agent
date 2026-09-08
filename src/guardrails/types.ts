@@ -23,6 +23,25 @@ export interface NormalizedGuardrailOutput {
   conversationId?: string;
 }
 
+export interface NormalizedGuardrailTool {
+  tool: string;
+  input: unknown;
+  workingDir: string;
+  source: NormalizedGuardrailInput["source"];
+  role: NormalizedGuardrailInput["role"];
+  conversationId?: string;
+}
+
+export interface RunToolGuardrail {
+  check(input: {
+    tool: string;
+    input: unknown;
+    workingDir: string;
+  }): GuardrailDecision | undefined;
+  redact(value: unknown): unknown;
+  rejection(decision: GuardrailDecision): string;
+}
+
 export interface GuardrailFinding {
   category: GuardrailCategory;
   severity: GuardrailSeverity;

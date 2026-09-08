@@ -241,7 +241,8 @@ async function runAgentLoopCore({
                   type: "tool_started",
                   step,
                   tool: part.toolName,
-                  input: part.input,
+                  input:
+                    runContext.toolGuardrail?.redact(part.input) ?? part.input,
                 });
 
                 const detection = loopDetector.detect(
@@ -279,7 +280,9 @@ async function runAgentLoopCore({
                   type: "tool_finished",
                   step,
                   tool: part.toolName,
-                  output,
+                  output: String(
+                    runContext.toolGuardrail?.redact(output) ?? output,
+                  ),
                 });
                 break;
               }
@@ -289,7 +292,12 @@ async function runAgentLoopCore({
                   type: "tool_failed",
                   step,
                   tool: part.toolName,
-                  error: part.error,
+                  error:
+                    runContext.toolGuardrail?.redact(
+                      part.error instanceof Error
+                        ? part.error.message
+                        : part.error,
+                    ) ?? part.error,
                 });
                 break;
 

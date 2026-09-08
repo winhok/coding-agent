@@ -428,6 +428,15 @@ export async function startAgent(
       toolView: registry.createView(selection),
       skillView: skillLoader.createView(),
       requestApproval,
+      ...(config.guardrails.enabled
+        ? {
+            toolGuardrail: guardrails.createToolGuardrail({
+              source: "cli",
+              role: registry.getRole(),
+              conversationId: config.session.id,
+            }),
+          }
+        : {}),
     });
   }
 

@@ -97,6 +97,8 @@ export class ToolExecutionPipeline {
     }: ExecuteOptions,
   ): Promise<string> {
     const startedAt = Date.now();
+    const safeAuditInput = (value: unknown) =>
+      executionContext.toolGuardrail?.redact(value) ?? value;
     executionContext.signal.throwIfAborted();
     await executionContext.inputEffectGate?.wait(executionContext.signal);
     executionContext.signal.throwIfAborted();
@@ -105,7 +107,13 @@ export class ToolExecutionPipeline {
       const preResult = await hookPipeline.runPre(tool.name, input);
       if (preResult.action === "block") {
         const reason = preResult.reason || "操作被阻止";
-        this.recordAudit(tool.name, input, "blocked", startedAt, reason);
+        this.recordAudit(
+          tool.name,
+          safeAuditInput(input),
+          "blocked",
+          startedAt,
+          reason,
+        );
         return `[Hook 拦截] ${reason}`;
       }
       if (
@@ -119,18 +127,46 @@ export class ToolExecutionPipeline {
 
     const validationError = this.validateInput(tool, input);
     if (validationError) {
-      this.recordAudit(tool.name, input, "invalid", startedAt, validationError);
+      this.recordAudit(
+        tool.name,
+        safeAuditInput(input),
+        "invalid",
+        startedAt,
+        validationError,
+      );
       return `[参数校验失败] ${tool.name}: ${validationError}`;
     }
     const validatedInput = input as Record<string, unknown>;
 
     if (!authorize(tool.name, validatedInput)) {
       const reason = "当前角色无权使用此工具";
-      this.recordAudit(tool.name, validatedInput, "denied", startedAt, reason, {
-        level: "deny",
-        approval: "not_required",
-      });
+      this.recordAudit(
+        tool.name,
+        safeAuditInput(validatedInput),
+        "denied",
+        startedAt,
+        reason,
+        { level: "deny", approval: "not_required" },
+      );
       return `[拒绝执行] ${reason}: ${tool.name}`;
+    }
+
+    const guardrailDecision = executionContext.toolGuardrail?.check({
+      tool: tool.name,
+      input: validatedInput,
+      workingDir: executionContext.workingDir,
+    });
+    if (guardrailDecision?.outcome === "blocked") {
+      const reason =
+        executionContext.toolGuardrail?.rejection(guardrailDecision);
+      this.recordAudit(
+        tool.name,
+        safeAuditInput(validatedInput),
+        "blocked",
+        startedAt,
+        reason,
+      );
+      return `[安全保护] ${reason}`;
     }
 
     const decision = decideToolPermission(tool, validatedInput);
@@ -141,7 +177,7 @@ export class ToolExecutionPipeline {
     if (decision.level === "deny") {
       this.recordAudit(
         tool.name,
-        validatedInput,
+        safeAuditInput(validatedInput),
         "denied",
         startedAt,
         decision.reason,
@@ -155,7 +191,7 @@ export class ToolExecutionPipeline {
         const reason = `${decision.reason}，但当前运行环境没有审批通道`;
         this.recordAudit(
           tool.name,
-          validatedInput,
+          safeAuditInput(validatedInput),
           "denied",
           startedAt,
           reason,
@@ -184,7 +220,7 @@ export class ToolExecutionPipeline {
           const reason = abortReason(executionContext.signal);
           this.recordAudit(
             tool.name,
-            validatedInput,
+            safeAuditInput(validatedInput),
             "aborted",
             startedAt,
             reason.message,
@@ -196,7 +232,7 @@ export class ToolExecutionPipeline {
         const reason = `${decision.reason}，审批失败: ${message}`;
         this.recordAudit(
           tool.name,
-          validatedInput,
+          safeAuditInput(validatedInput),
           "denied",
           startedAt,
           reason,
@@ -210,7 +246,7 @@ export class ToolExecutionPipeline {
         const reason = `用户拒绝: ${decision.reason}`;
         this.recordAudit(
           tool.name,
-          validatedInput,
+          safeAuditInput(validatedInput),
           "denied",
           startedAt,
           reason,
@@ -249,9 +285,12 @@ export class ToolExecutionPipeline {
         executionContext.signal.throwIfAborted();
       }
 
+      const redactedOutput = executionContext.toolGuardrail?.redact(output);
+      if (redactedOutput !== undefined) output = String(redactedOutput);
+
       this.recordAudit(
         tool.name,
-        validatedInput,
+        safeAuditInput(validatedInput),
         "completed",
         startedAt,
         undefined,
@@ -262,7 +301,7 @@ export class ToolExecutionPipeline {
       const aborted = executionContext.signal.aborted;
       this.recordAudit(
         tool.name,
-        validatedInput,
+        safeAuditInput(validatedInput),
         aborted ? "aborted" : "failed",
         startedAt,
         error instanceof Error ? error.message : String(error),

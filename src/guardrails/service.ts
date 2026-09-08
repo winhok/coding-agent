@@ -1,11 +1,15 @@
 import type { GuardrailAuditStore } from "./audit.js";
 import { evaluateDeterministicInput } from "./deterministic.js";
 import { evaluateDeterministicOutput } from "./deterministic-output.js";
+import { evaluateDeterministicTool } from "./deterministic-tool.js";
+import { redactSensitiveValue } from "./redaction.js";
 import {
   type GuardrailDecision,
   InputTripwireError,
   type NormalizedGuardrailInput,
   type NormalizedGuardrailOutput,
+  type NormalizedGuardrailTool,
+  type RunToolGuardrail,
 } from "./types.js";
 
 export interface GuardrailServiceOptions {
@@ -49,6 +53,32 @@ export class GuardrailService {
     this.options.audit.append(output, decision, "output");
     return decision;
   }
+
+  checkTool(tool: NormalizedGuardrailTool): GuardrailDecision | undefined {
+    if (!this.options.enabled) return undefined;
+    const decision = evaluateDeterministicTool(
+      tool,
+      this.options.policyVersion,
+      this.options.knownSecrets
+        ? { knownSecrets: this.options.knownSecrets }
+        : {},
+    );
+    this.options.audit.append(tool, decision, "tool");
+    return decision;
+  }
+
+  createToolGuardrail(context: {
+    source: NormalizedGuardrailTool["source"];
+    role: NormalizedGuardrailTool["role"];
+    conversationId?: string;
+  }): RunToolGuardrail {
+    return {
+      check: ({ tool, input, workingDir }) =>
+        this.checkTool({ tool, input, workingDir, ...context }),
+      redact: (value) => redactSensitiveValue(value, this.options.knownSecrets),
+      rejection: safeToolRejection,
+    };
+  }
 }
 
 export function safeOutputReplacement(decision: GuardrailDecision): string {
@@ -65,4 +95,8 @@ export function safeOutputReplacement(decision: GuardrailDecision): string {
     default:
       return "响应未通过安全检查，已被拦截。请调整请求后重试。";
   }
+}
+
+function safeToolRejection(_decision: GuardrailDecision): string {
+  return "该工具调用触发了安全保护，未执行。请移除敏感信息、越界路径或绕过内容后重试。";
 }

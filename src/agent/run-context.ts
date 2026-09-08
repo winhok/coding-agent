@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { InputEffectGate } from "../guardrails/input-gate.js";
+import type { RunToolGuardrail } from "../guardrails/types.js";
 import type { RequestApproval } from "../security/permissions.js";
 import type { SkillView } from "../skills/loader.js";
 import type { ToolView } from "../tools/registry.js";
@@ -18,6 +19,7 @@ export interface AgentRunContext {
   skillView: SkillView;
   requestApproval?: RequestApproval;
   inputEffectGate?: InputEffectGate;
+  toolGuardrail?: RunToolGuardrail;
 }
 
 export interface AgentRunContextOptions {
@@ -31,6 +33,7 @@ export interface AgentRunContextOptions {
   skillView: SkillView;
   requestApproval?: RequestApproval;
   inputEffectGate?: InputEffectGate;
+  toolGuardrail?: RunToolGuardrail;
 }
 
 export function createAgentRunContext(
@@ -54,6 +57,7 @@ export function createAgentRunContext(
     ...(options.inputEffectGate
       ? { inputEffectGate: options.inputEffectGate }
       : {}),
+    ...(options.toolGuardrail ? { toolGuardrail: options.toolGuardrail } : {}),
   };
 }
 
@@ -85,5 +89,6 @@ export function deriveAgentRunContext(
     ...(parent.inputEffectGate
       ? { inputEffectGate: parent.inputEffectGate }
       : {}),
+    ...(parent.toolGuardrail ? { toolGuardrail: parent.toolGuardrail } : {}),
   });
 }

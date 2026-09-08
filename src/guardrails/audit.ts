@@ -4,11 +4,13 @@ import type {
   GuardrailDecision,
   NormalizedGuardrailInput,
   NormalizedGuardrailOutput,
+  NormalizedGuardrailTool,
 } from "./types.js";
 
 export interface GuardrailAuditRecord {
   timestamp: string;
-  stage: "input" | "output";
+  stage: "input" | "output" | "tool";
+  tool?: string;
   source: NormalizedGuardrailInput["source"];
   role: NormalizedGuardrailInput["role"];
   outcome: GuardrailDecision["outcome"];
@@ -27,13 +29,17 @@ export class GuardrailAuditStore {
   ) {}
 
   append(
-    input: NormalizedGuardrailInput | NormalizedGuardrailOutput,
+    input:
+      | NormalizedGuardrailInput
+      | NormalizedGuardrailOutput
+      | NormalizedGuardrailTool,
     decision: GuardrailDecision,
     stage: GuardrailAuditRecord["stage"] = "input",
   ): void {
     const record: GuardrailAuditRecord = {
       timestamp: new Date().toISOString(),
       stage,
+      ...(stage === "tool" && "tool" in input ? { tool: input.tool } : {}),
       source: input.source,
       role: input.role,
       outcome: decision.outcome,
