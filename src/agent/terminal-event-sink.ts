@@ -5,6 +5,12 @@ export const terminalAgentEventSink: AgentEventSink = (event) => {
   switch (event.type) {
     case "run_started":
     case "run_failed":
+    case "guardrail_decision":
+      break;
+    case "guardrail_terminal":
+      if (event.outcome !== "passed") {
+        console.log(`\n[Guardrail: ${event.outcome}]`);
+      }
       break;
     case "step_started":
       console.log(`\n--- Step ${event.step} ---`);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { GuardrailService } from "../guardrails/service.js";
 import {
   safeCronInputRejection,
@@ -5,6 +6,7 @@ import {
 } from "../guardrails/service.js";
 import {
   type GuardrailDecision,
+  type GuardrailTerminalOutcome,
   InputTripwireError,
 } from "../guardrails/types.js";
 import { getNextCronTime, parseSchedule } from "./parser.js";
@@ -232,6 +234,7 @@ export class CronService {
     const startedAt = new Date().toISOString();
     let output = "";
     let status: RunLog["status"] = "success";
+    let terminalOutcome: GuardrailTerminalOutcome = "passed";
     let error: string | undefined;
 
     try {
@@ -244,6 +247,8 @@ export class CronService {
         this.store.clearPause(state.config.id);
       } else {
         status = result.status;
+        terminalOutcome =
+          result.status === "review_required" ? "review_required" : "blocked";
         state.consecutiveFailures = 0;
         state.pause = {
           status: result.status,
@@ -261,6 +266,7 @@ export class CronService {
         this.options.guardrails?.redactActivity(rawMessage) ?? rawMessage,
       );
       status = message.includes("timeout") ? "timeout" : "error";
+      terminalOutcome = status === "timeout" ? "timed_out" : "errored";
       error = message;
       output = `执行失败: ${message}`;
       state.consecutiveFailures++;
@@ -276,6 +282,15 @@ export class CronService {
     } finally {
       state.running = false;
     }
+
+    this.options.guardrails?.recordTerminal({
+      source: "cron",
+      role: "owner",
+      outcome: terminalOutcome,
+      requestHash: createHash("sha256")
+        .update(JSON.stringify(state.config.payload))
+        .digest("hex"),
+    });
 
     const log: RunLog = {
       jobId: state.config.id,

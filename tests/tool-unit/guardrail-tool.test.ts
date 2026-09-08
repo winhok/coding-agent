@@ -155,6 +155,13 @@ describe("tool guardrail", () => {
     assert.equal(result.text, "safe final");
     assert.doesNotMatch(JSON.stringify(events), new RegExp(secret));
     assert.match(JSON.stringify(events), /secret/);
+    assert.equal(
+      events.some(
+        (event) =>
+          event.type === "guardrail_decision" && event.stage === "tool",
+      ),
+      true,
+    );
     assert.doesNotMatch(
       JSON.stringify(registry.getExecutionAuditLog()),
       new RegExp(secret),

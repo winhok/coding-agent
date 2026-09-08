@@ -24,6 +24,10 @@ export interface AgentRunContext {
   inputEffectGate?: InputEffectGate;
   toolGuardrail?: RunToolGuardrail;
   guardrailState?: GuardrailRunState;
+  reportGuardrailDecision?: (
+    stage: "input" | "tool" | "output",
+    decision: import("../guardrails/types.js").GuardrailDecision,
+  ) => void | Promise<void>;
 }
 
 export interface AgentRunContextOptions {
@@ -39,6 +43,7 @@ export interface AgentRunContextOptions {
   inputEffectGate?: InputEffectGate;
   toolGuardrail?: RunToolGuardrail;
   guardrailState?: GuardrailRunState;
+  reportGuardrailDecision?: AgentRunContext["reportGuardrailDecision"];
 }
 
 export function createAgentRunContext(
@@ -66,6 +71,9 @@ export function createAgentRunContext(
     ...(options.guardrailState
       ? { guardrailState: options.guardrailState }
       : {}),
+    ...(options.reportGuardrailDecision
+      ? { reportGuardrailDecision: options.reportGuardrailDecision }
+      : {}),
   };
 }
 
@@ -79,6 +87,7 @@ export interface ChildAgentRunContextOptions {
   requestApproval?: RequestApproval;
   toolGuardrail?: RunToolGuardrail;
   guardrailState?: GuardrailRunState;
+  reportGuardrailDecision?: AgentRunContext["reportGuardrailDecision"];
 }
 
 export function deriveAgentRunContext(
@@ -104,6 +113,12 @@ export function deriveAgentRunContext(
       : {}),
     ...((options.guardrailState ?? parent.guardrailState)
       ? { guardrailState: options.guardrailState ?? parent.guardrailState }
+      : {}),
+    ...((options.reportGuardrailDecision ?? parent.reportGuardrailDecision)
+      ? {
+          reportGuardrailDecision:
+            options.reportGuardrailDecision ?? parent.reportGuardrailDecision,
+        }
       : {}),
   });
 }

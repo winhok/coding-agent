@@ -156,6 +156,12 @@ export class ToolExecutionPipeline {
       input: validatedInput,
       workingDir: executionContext.workingDir,
     });
+    if (guardrailDecision) {
+      await executionContext.reportGuardrailDecision?.(
+        "tool",
+        guardrailDecision,
+      );
+    }
     if (guardrailDecision?.outcome === "blocked") {
       const reason =
         executionContext.toolGuardrail?.rejection(guardrailDecision);

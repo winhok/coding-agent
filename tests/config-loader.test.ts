@@ -32,6 +32,7 @@ describe("config", () => {
     assert.deepEqual(config.mcp.servers, []);
     assert.equal(config.guardrails.enabled, true);
     assert.equal(config.guardrails.mandatoryRules, true);
+    assert.equal(config.guardrails.auditRetentionDays, 30);
     assert.equal(config.guardrails.inputMode, "parallel");
     assert.equal(config.guardrails.cancellationConvergenceTimeoutMs, 2_000);
   });

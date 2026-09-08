@@ -128,7 +128,27 @@ export async function agentLoop(
   });
 
   if (inputGuardrail.mode === "blocking") {
-    const decision = await check;
+    let decision: GuardrailDecision | undefined;
+    try {
+      decision = await check;
+    } catch (error) {
+      if (error instanceof InputTripwireError) {
+        await reportGuardrailDecision(
+          "input",
+          error.decision,
+          targetSink,
+          baseOptions.trace,
+        );
+        await targetSink?.({ type: "guardrail_terminal", outcome: "blocked" });
+      }
+      throw error;
+    }
+    await reportGuardrailDecision(
+      "input",
+      decision,
+      targetSink,
+      baseOptions.trace,
+    );
     gate.pass();
     return withInputSummary(await runAgentLoopCore(coreOptions), decision);
   }
@@ -147,12 +167,42 @@ export async function agentLoop(
       inputGuardrail.cancellationConvergenceTimeoutMs ??
         DEFAULT_CANCELLATION_CONVERGENCE_TIMEOUT_MS,
     );
+    if (error instanceof InputTripwireError) {
+      await reportGuardrailDecision(
+        "input",
+        error.decision,
+        targetSink,
+        baseOptions.trace,
+      );
+      await targetSink?.({
+        type: "guardrail_terminal",
+        outcome: converged ? "blocked" : "cancellation_incomplete",
+      });
+    }
     if (error instanceof InputTripwireError && !converged) {
       throw new InputTripwireError(error.decision, "incomplete");
     }
     throw error;
   }
 
+  try {
+    await reportGuardrailDecision(
+      "input",
+      decision,
+      targetSink,
+      baseOptions.trace,
+    );
+  } catch (error) {
+    gate.block(error);
+    runController.abort(error);
+    bufferedEvents.length = 0;
+    await settlesWithin(
+      core,
+      inputGuardrail.cancellationConvergenceTimeoutMs ??
+        DEFAULT_CANCELLATION_CONVERGENCE_TIMEOUT_MS,
+    );
+    throw error;
+  }
   releasePromise = flushEvents(bufferedEvents.splice(0), targetSink);
   released = true;
   gate.pass();
@@ -165,7 +215,7 @@ async function runAgentLoopCore({
   registry,
   messages,
   system,
-  runContext,
+  runContext: baseRunContext,
   tracker,
   onStepUsage,
   onStepCompleted,
@@ -176,6 +226,11 @@ async function runAgentLoopCore({
   forceFinalStep = false,
   outputGuardrail,
 }: Omit<AgentLoopOptions, "inputGuardrail">): Promise<AgentLoopResult> {
+  const runContext: AgentRunContext = {
+    ...baseRunContext,
+    reportGuardrailDecision: (stage, decision) =>
+      reportGuardrailDecision(stage, decision, eventSink, trace),
+  };
   let step = 0;
   let toolCalls = 0;
   let retries = 0;
@@ -366,6 +421,12 @@ async function runAgentLoopCore({
             outputGuardrailSummary,
             guarded.summary,
           );
+          await reportGuardrailDecision(
+            "output",
+            guarded.decision,
+            eventSink,
+            trace,
+          );
           await flushEvents(guarded.events, eventSink);
         }
         finalText = fullText;
@@ -400,6 +461,12 @@ async function runAgentLoopCore({
         outputGuardrailSummary = mergeOutputSummary(
           outputGuardrailSummary,
           guarded.summary,
+        );
+        await reportGuardrailDecision(
+          "output",
+          guarded.decision,
+          eventSink,
+          trace,
         );
         bufferedTextEvents.splice(
           0,
@@ -455,6 +522,21 @@ async function runAgentLoopCore({
     }
     termination ??= "max_steps";
   } catch (error) {
+    if (
+      outputGuardrail ||
+      runContext.toolGuardrail ||
+      runContext.inputEffectGate
+    ) {
+      const reason = runContext.signal.reason;
+      await emit({
+        type: "guardrail_terminal",
+        outcome: runContext.signal.aborted
+          ? reason instanceof DOMException && reason.name === "TimeoutError"
+            ? "timed_out"
+            : "cancelled"
+          : "errored",
+      });
+    }
     await emit({ type: "run_failed", error });
     throw error;
   }
@@ -470,10 +552,27 @@ async function runAgentLoopCore({
     text: finalText,
     termination,
     stats,
-    ...(outputGuardrailSummary
-      ? { guardrails: { output: outputGuardrailSummary } }
+    ...(outputGuardrailSummary || runContext.toolGuardrail
+      ? {
+          guardrails: {
+            terminal: outputGuardrailSummary?.review
+              ? "review_required"
+              : outputGuardrailSummary?.outcome === "blocked"
+                ? "blocked"
+                : "passed",
+            ...(outputGuardrailSummary
+              ? { output: outputGuardrailSummary }
+              : {}),
+          },
+        }
       : {}),
   };
+  if (result.guardrails?.terminal) {
+    await emit({
+      type: "guardrail_terminal",
+      outcome: result.guardrails.terminal,
+    });
+  }
   await emit({ type: "run_finished", result });
   return result;
 }
@@ -517,7 +616,14 @@ function withInputSummary(
     durationMs: decision.durationMs,
     categories: decision.findings.map((finding) => finding.category),
   };
-  return { ...result, guardrails: { ...result.guardrails, input } };
+  return {
+    ...result,
+    guardrails: {
+      terminal: result.guardrails?.terminal ?? "passed",
+      ...result.guardrails,
+      input,
+    },
+  };
 }
 
 function decisionSummary(
@@ -544,12 +650,13 @@ async function resolveGuardedOutput(
   messages: ModelMessage[];
   events: Parameters<AgentEventSink>[0][];
   summary?: NonNullable<GuardrailSummary["output"]>;
+  decision?: GuardrailDecision;
 }> {
   let decision = await guardrail.check(text, signal);
   if (!decision) return { text, messages, events };
   let summary = decisionSummary(decision);
   if (decision.outcome !== "blocked") {
-    return { text, messages, events, summary };
+    return { text, messages, events, summary, decision };
   }
 
   if (isReviewable(decision) && guardrail.repair) {
@@ -563,6 +670,10 @@ async function resolveGuardedOutput(
       signal.throwIfAborted();
       const repairedDecision = await guardrail.check(repaired, signal);
       if (!repairedDecision || repairedDecision.outcome === "passed") {
+        const passedDecision = repairedDecision ?? {
+          ...decision,
+          outcome: "passed" as const,
+        };
         return {
           text: repaired,
           messages: replaceAssistantText(messages, repaired),
@@ -570,9 +681,10 @@ async function resolveGuardedOutput(
           summary: {
             ...(repairedDecision
               ? decisionSummary(repairedDecision)
-              : decisionSummary({ ...decision, outcome: "passed" })),
+              : decisionSummary(passedDecision)),
             repair: "passed",
           },
+          decision: passedDecision,
         };
       }
       decision = repairedDecision;
@@ -603,6 +715,7 @@ async function resolveGuardedOutput(
           }
         : {}),
     },
+    decision,
   };
 }
 
@@ -622,6 +735,31 @@ function mergeOutputSummary(
     ...(current.repair ? { repair: current.repair } : {}),
     ...(current.review ? { review: current.review } : {}),
   };
+}
+
+async function reportGuardrailDecision(
+  stage: "input" | "tool" | "output",
+  decision: GuardrailDecision | undefined,
+  sink: AgentEventSink | undefined,
+  trace: LocalTraceRecorder | undefined,
+): Promise<void> {
+  if (!decision) return;
+  const finding = decision.findings[0];
+  const semantic = decision.semantic;
+  const event = {
+    type: "guardrail_decision" as const,
+    stage,
+    outcome: semantic?.outcome ?? decision.outcome,
+    ...(finding ? { category: finding.category } : {}),
+    ...(finding ? { severity: finding.severity } : {}),
+    ...(finding ? { ruleId: finding.ruleId } : {}),
+    enforcementMode: semantic?.mode ?? ("enforce" as const),
+    policyVersion: decision.policyVersion,
+    durationMs: decision.durationMs + (semantic?.durationMs ?? 0),
+    result: finding?.evidence ?? `[redacted:${decision.outcome}]`,
+  };
+  await sink?.(event);
+  await trace?.recordGuardrail(event);
 }
 
 function replaceAssistantText(

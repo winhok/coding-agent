@@ -39,6 +39,15 @@ export type SemanticGuardrailOutcome =
   | "errored"
   | "queue_overflow";
 
+export type GuardrailTerminalOutcome =
+  | "passed"
+  | "blocked"
+  | "review_required"
+  | "timed_out"
+  | "errored"
+  | "cancelled"
+  | "cancellation_incomplete";
+
 export interface SemanticGuardrailAggregate {
   mode: "shadow" | "enforce";
   outcome: SemanticGuardrailOutcome;
@@ -108,6 +117,7 @@ export interface GuardrailDecision {
 }
 
 export interface GuardrailSummary {
+  terminal?: GuardrailTerminalOutcome;
   input?: Omit<GuardrailDecision, "findings"> & {
     categories: GuardrailCategory[];
     cancellation?: "complete" | "incomplete";

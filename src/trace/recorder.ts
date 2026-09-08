@@ -1,9 +1,30 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ModelMessage } from "ai";
+import { redactSensitiveValue } from "../guardrails/redaction.js";
 import type { StepUsage } from "../usage/tracker.js";
 
-type TraceStatus = "completed" | "failed" | "cancelled" | "blocked";
+type TraceStatus =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "blocked"
+  | "review_required"
+  | "timed_out"
+  | "errored"
+  | "cancellation_incomplete";
+
+export interface GuardrailTraceInput {
+  stage: "input" | "tool" | "output";
+  outcome: string;
+  category?: string;
+  severity?: string;
+  ruleId?: string;
+  enforcementMode: "enforce" | "shadow";
+  policyVersion: string;
+  durationMs: number;
+  result: string;
+}
 
 interface TraceOptions {
   directory?: string;
@@ -35,19 +56,8 @@ interface TraceEvent {
   usage?: { inputTokens?: number; outputTokens?: number };
 }
 
-const SECRET_KEY = /api[-_]?key|token|secret|password|authorization/i;
-
 function sanitize(value: unknown, key = ""): unknown {
-  if (SECRET_KEY.test(key)) return "[REDACTED]";
-  if (Array.isArray(value)) return value.map((item) => sanitize(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(
-        ([childKey, childValue]) => [childKey, sanitize(childValue, childKey)],
-      ),
-    );
-  }
-  return value;
+  return redactSensitiveValue(value, [], key);
 }
 
 function safeName(value: string): string {
@@ -147,6 +157,15 @@ export class LocalTraceRecorder {
     });
   }
 
+  async recordGuardrail(input: GuardrailTraceInput): Promise<void> {
+    await this.write({
+      type: "guardrail_decision",
+      traceId: this.traceId,
+      timestamp: new Date().toISOString(),
+      ...(sanitize(input) as Record<string, unknown>),
+    });
+  }
+
   async finish(status: TraceStatus, error?: unknown): Promise<void> {
     await this.write({
       type: "trace_finished",
@@ -161,7 +180,11 @@ export class LocalTraceRecorder {
   private async write(event: Record<string, unknown>): Promise<void> {
     if (this.writeFailed) return;
     try {
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(
+        this.filePath,
+        `${JSON.stringify(sanitize(event))}\n`,
+        "utf8",
+      );
     } catch (error) {
       this.writeFailed = true;
       console.warn(`  [Trace] 写入失败，已停止记录: ${errorMessage(error)}`);

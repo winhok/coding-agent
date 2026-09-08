@@ -125,6 +125,7 @@ describe("input guardrail coordination", () => {
     assert.deepEqual(
       events.map((event) => event.type),
       [
+        "guardrail_decision",
         "run_started",
         "step_started",
         "tool_started",
@@ -186,7 +187,10 @@ describe("input guardrail coordination", () => {
     );
     assert.equal(executed, false);
     assert.equal(approvalRequested, false);
-    assert.deepEqual(events, []);
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ["guardrail_decision", "guardrail_terminal"],
+    );
   });
 
   it("reports cancellation incomplete when a non-cooperative model misses the convergence deadline", async () => {

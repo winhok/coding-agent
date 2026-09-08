@@ -97,6 +97,7 @@ export async function runInit(): Promise<void> {
       policyVersion: "1.0",
       auditFile: ".guardrails/audit.jsonl",
       auditCapacity: 1_000,
+      auditRetentionDays: 30,
       mandatoryRules: true,
       sensitiveFields: [],
       inputMode: "parallel",

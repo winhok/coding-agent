@@ -1,4 +1,10 @@
 import type { ModelMessage } from "ai";
+import type {
+  GuardrailCategory,
+  GuardrailSeverity,
+  GuardrailTerminalOutcome,
+  SemanticGuardrailOutcome,
+} from "../guardrails/types.js";
 import type { StepUsage } from "../usage/tracker.js";
 
 export type AgentLoopTermination = "completed" | "loop_detected" | "max_steps";
@@ -49,6 +55,19 @@ export type AgentEvent =
     }
   | { type: "step_finished"; step: number; text: string; hasToolCall: boolean }
   | { type: "step_continuing"; step: number }
+  | {
+      type: "guardrail_decision";
+      stage: "input" | "tool" | "output";
+      outcome: "passed" | "blocked" | SemanticGuardrailOutcome;
+      category?: GuardrailCategory;
+      severity?: GuardrailSeverity;
+      ruleId?: string;
+      enforcementMode: "enforce" | "shadow";
+      policyVersion: string;
+      durationMs: number;
+      result: string;
+    }
+  | { type: "guardrail_terminal"; outcome: GuardrailTerminalOutcome }
   | { type: "run_finished"; result: AgentLoopResult }
   | { type: "run_failed"; error: unknown };
 

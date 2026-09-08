@@ -153,6 +153,12 @@ export async function spawnAgent(
     } catch (error) {
       if (!(error instanceof InputTripwireError)) throw error;
       const rejection = safeChildInputRejection();
+      ctx.guardrails.recordTerminal({
+        source: "child",
+        role: "owner",
+        outcome: "blocked",
+        requestHash: error.decision.requestHash,
+      });
       ctx.agentRegistry.block(runId, rejection);
       return rejection;
     }
@@ -312,6 +318,14 @@ export async function spawnAgent(
     const result = await raceWithAbort(loopPromise, signal);
     const output = result.text || "(无输出)";
     const outputBlocked = result.guardrails?.output?.outcome === "blocked";
+    if (childInputDecision && ctx.guardrails) {
+      ctx.guardrails.recordTerminal({
+        source: "child",
+        role: "owner",
+        outcome: result.guardrails?.terminal ?? "passed",
+        requestHash: childInputDecision.requestHash,
+      });
+    }
     if (outputBlocked) ctx.agentRegistry.block(runId, output);
     else ctx.agentRegistry.complete(runId, output, result.stats);
     await trace.finish(outputBlocked ? "blocked" : "completed");
@@ -336,8 +350,35 @@ export async function spawnAgent(
     const errorMessage = `${String(
       ctx.guardrails?.redactActivity(rawErrorMessage) ?? rawErrorMessage,
     )}${converged ? "" : "；取消未完全收敛"}`;
-    ctx.agentRegistry.fail(runId, errorMessage, isAbort);
-    await trace?.finish(isAbort ? "cancelled" : "failed", error);
+    if (childInputDecision && ctx.guardrails) {
+      ctx.guardrails.recordTerminal({
+        source: "child",
+        role: "owner",
+        outcome: isAbort
+          ? converged
+            ? timedOut
+              ? "timed_out"
+              : "cancelled"
+            : "cancellation_incomplete"
+          : "errored",
+        requestHash: childInputDecision.requestHash,
+      });
+    }
+    if (isAbort && !converged) {
+      ctx.agentRegistry.cancellationIncomplete(runId, errorMessage);
+    } else {
+      ctx.agentRegistry.fail(runId, errorMessage, isAbort);
+    }
+    await trace?.finish(
+      isAbort
+        ? converged
+          ? timedOut
+            ? "timed_out"
+            : "cancelled"
+          : "cancellation_incomplete"
+        : "failed",
+      error,
+    );
     console.log(`  ${tag} ${isAbort ? "超时" : "失败"} ✗: ${errorMessage}`);
     if (isAbort && ctx.guardrails) {
       return `[sub-agent cancelled] ${errorMessage}`;

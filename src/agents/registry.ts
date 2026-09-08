@@ -67,6 +67,14 @@ export class SubAgentRegistry {
     run.finishedAt = new Date().toISOString();
   }
 
+  cancellationIncomplete(id: string, error: string): void {
+    const run = this.runs.get(id);
+    if (!run) return;
+    run.status = "cancellation_incomplete";
+    run.error = error;
+    run.finishedAt = new Date().toISOString();
+  }
+
   get(id: string): SubAgentRun | undefined {
     return this.runs.get(id);
   }

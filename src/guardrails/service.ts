@@ -9,6 +9,7 @@ import {
 } from "./semantic.js";
 import {
   type GuardrailDecision,
+  type GuardrailTerminalOutcome,
   InputTripwireError,
   type NormalizedGuardrailInput,
   type NormalizedGuardrailOutput,
@@ -116,6 +117,21 @@ export class GuardrailService {
 
   redactActivity(value: unknown): unknown {
     return redactSensitiveValue(value, this.options.knownSecrets);
+  }
+
+  recordTerminal(input: {
+    source: NormalizedGuardrailInput["source"];
+    role: NormalizedGuardrailInput["role"];
+    outcome: GuardrailTerminalOutcome;
+    requestHash: string;
+    durationMs?: number;
+  }): void {
+    if (!this.options.enabled) return;
+    this.options.audit.appendTerminal({
+      ...input,
+      policyVersion: this.options.policyVersion,
+      durationMs: input.durationMs ?? 0,
+    });
   }
 }
 

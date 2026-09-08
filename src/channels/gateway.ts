@@ -244,6 +244,12 @@ export class ChannelGateway {
         });
       } catch (error) {
         if (!(error instanceof InputTripwireError)) throw error;
+        this.options.guardrails.recordTerminal({
+          source: "feishu",
+          role: "owner",
+          outcome: "blocked",
+          requestHash: error.decision.requestHash,
+        });
         const rejected = this.store.rejectIngress(
           channelName,
           message,
@@ -333,6 +339,12 @@ export class ChannelGateway {
             });
           } catch (error) {
             if (!(error instanceof InputTripwireError)) throw error;
+            this.options.guardrails.recordTerminal({
+              source: "feishu",
+              role: "owner",
+              outcome: "blocked",
+              requestHash: error.decision.requestHash,
+            });
             const outbox = this.store.completeTurnWithOutbox(
               turn,
               [],
@@ -462,6 +474,14 @@ export class ChannelGateway {
           }
         }
         result = this.applyOutputGuardrail(result, turn);
+        if (inputGuardrail && this.options.guardrails) {
+          this.options.guardrails.recordTerminal({
+            source: "feishu",
+            role: "owner",
+            outcome: result.guardrails?.terminal ?? "passed",
+            requestHash: inputGuardrail.requestHash,
+          });
+        }
         const outbox = this.store.completeTurnWithOutbox(
           turn,
           result.appendedMessages.filter(

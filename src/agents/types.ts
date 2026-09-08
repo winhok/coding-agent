@@ -31,7 +31,13 @@ export interface SubAgentRun {
   id: string;
   task: string;
   profile: string;
-  status: "running" | "completed" | "blocked" | "error" | "timeout";
+  status:
+    | "running"
+    | "completed"
+    | "blocked"
+    | "error"
+    | "timeout"
+    | "cancellation_incomplete";
   depth: number;
   startedAt: string;
   finishedAt?: string;

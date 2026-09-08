@@ -117,6 +117,7 @@ const config = loadConfig();
 const guardrailAudit = new GuardrailAuditStore(
   config.guardrails.auditFile,
   config.guardrails.auditCapacity,
+  config.guardrails.auditRetentionDays * 24 * 60 * 60_000,
 );
 
 const MODEL_CONFIG = {
@@ -934,6 +935,12 @@ export async function startAgent(
       inputGuardrail = guardrails.checkInput(normalizedGuardrailInput);
     } catch (error) {
       if (!(error instanceof InputTripwireError)) throw error;
+      guardrails.recordTerminal({
+        source: "cli",
+        role: registry.getRole(),
+        outcome: "blocked",
+        requestHash: error.decision.requestHash,
+      });
       return {
         status: "blocked",
         answer: error.message,
@@ -951,6 +958,7 @@ export async function startAgent(
         },
         tracePath: "",
         guardrails: {
+          terminal: "blocked",
           input: {
             outcome: error.decision.outcome,
             policyVersion: error.decision.policyVersion,
@@ -1069,13 +1077,34 @@ export async function startAgent(
         trace,
       });
       await trace.finish(
-        loopResult.guardrails?.output?.outcome === "blocked"
-          ? "blocked"
-          : "completed",
+        loopResult.guardrails?.terminal === "review_required"
+          ? "review_required"
+          : loopResult.guardrails?.terminal === "blocked"
+            ? "blocked"
+            : "completed",
       );
+      if (inputGuardrail) {
+        guardrails.recordTerminal({
+          source: "cli",
+          role: registry.getRole(),
+          outcome: loopResult.guardrails?.terminal ?? "passed",
+          requestHash: inputGuardrail.requestHash,
+        });
+      }
       console.log(`  [Trace] ${trace.filePath}`);
     } catch (error) {
-      await trace.finish("failed", error);
+      await trace.finish(
+        error instanceof InputTripwireError &&
+          error.cancellation === "incomplete"
+          ? "cancellation_incomplete"
+          : runContext.signal.aborted
+            ? runContext.signal.reason instanceof DOMException &&
+              runContext.signal.reason.name === "TimeoutError"
+              ? "timed_out"
+              : "cancelled"
+            : "errored",
+        error,
+      );
       throw error;
     }
 
@@ -1098,14 +1127,18 @@ export async function startAgent(
         (entry) => entry.outcome === "denied" || entry.outcome === "blocked",
       );
     const outputBlocked = loopResult.guardrails?.output?.outcome === "blocked";
+    const reviewRequired =
+      loopResult.guardrails?.terminal === "review_required";
     return {
-      status: outputBlocked
-        ? "blocked"
-        : policyDenied
-          ? "permission_denied"
-          : loopResult.termination === "completed"
-            ? "completed"
-            : "incomplete",
+      status: reviewRequired
+        ? "review_required"
+        : outputBlocked
+          ? "blocked"
+          : policyDenied
+            ? "permission_denied"
+            : loopResult.termination === "completed"
+              ? "completed"
+              : "incomplete",
       answer: loopResult.text || "(无输出)",
       termination: loopResult.termination,
       stats: loopResult.stats,

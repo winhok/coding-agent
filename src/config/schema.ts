@@ -212,6 +212,7 @@ export const GuardrailConfigSchema = z.object({
   policyVersion: z.string().trim().min(1).default("1.0"),
   auditFile: z.string().trim().min(1).default(".guardrails/audit.jsonl"),
   auditCapacity: z.number().int().positive().max(100_000).default(1_000),
+  auditRetentionDays: z.number().int().positive().max(365).default(30),
   mandatoryRules: z.literal(true).default(true),
   sensitiveFields: z
     .array(
