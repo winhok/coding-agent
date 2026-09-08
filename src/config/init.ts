@@ -101,6 +101,18 @@ export async function runInit(): Promise<void> {
       sensitiveFields: [],
       inputMode: "parallel",
       cancellationConvergenceTimeoutMs: 2_000,
+      semantic: {
+        enabled: true,
+        mode: "shadow",
+        model: "",
+        baseURL: "",
+        apiKey: "",
+        timeoutMs: 3_000,
+        maxOutputTokens: 300,
+        retries: 1,
+        concurrency: 2,
+        queueSize: 100,
+      },
     },
   };
 

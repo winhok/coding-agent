@@ -194,6 +194,19 @@ export const UsageConfigSchema = z.object({
   trackingFile: z.string().default(".usage/today.jsonl"),
 });
 
+export const SemanticGuardrailConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  mode: z.literal("shadow").default("shadow"),
+  model: z.string().trim().default(""),
+  baseURL: z.string().trim().default(""),
+  apiKey: z.string().default(""),
+  timeoutMs: z.number().int().positive().max(30_000).default(3_000),
+  maxOutputTokens: z.number().int().min(64).max(1_000).default(300),
+  retries: z.number().int().min(0).max(1).default(1),
+  concurrency: z.number().int().positive().max(20).default(2),
+  queueSize: z.number().int().min(0).max(10_000).default(100),
+});
+
 export const GuardrailConfigSchema = z.object({
   enabled: z.boolean().default(true),
   policyVersion: z.string().trim().min(1).default("1.0"),
@@ -216,6 +229,7 @@ export const GuardrailConfigSchema = z.object({
     .positive()
     .max(30_000)
     .default(2_000),
+  semantic: SemanticGuardrailConfigSchema.prefault({}),
 });
 
 export const SuperAgentConfigSchema = z.object({

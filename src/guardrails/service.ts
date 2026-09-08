@@ -4,6 +4,10 @@ import { evaluateDeterministicOutput } from "./deterministic-output.js";
 import { evaluateDeterministicTool } from "./deterministic-tool.js";
 import { redactSensitiveValue } from "./redaction.js";
 import {
+  type SemanticGuardrailRunner,
+  unavailableSemanticResult,
+} from "./semantic.js";
+import {
   type GuardrailDecision,
   InputTripwireError,
   type NormalizedGuardrailInput,
@@ -18,6 +22,8 @@ export interface GuardrailServiceOptions {
   audit: GuardrailAuditStore;
   knownSecrets?: readonly string[];
   sensitiveFields?: readonly string[];
+  semantic?: SemanticGuardrailRunner;
+  semanticUnavailableReason?: string;
 }
 
 export class GuardrailService {
@@ -32,6 +38,34 @@ export class GuardrailService {
     this.options.audit.append(input, decision);
     if (decision.outcome === "blocked") throw new InputTripwireError(decision);
     return decision;
+  }
+
+  async checkInputWithSemantic(
+    input: NormalizedGuardrailInput,
+    signal: AbortSignal,
+  ): Promise<GuardrailDecision | undefined> {
+    const deterministic = this.checkInput(input);
+    if (!deterministic) return undefined;
+    return this.checkSemanticInput(input, deterministic, signal);
+  }
+
+  async checkSemanticInput(
+    input: NormalizedGuardrailInput,
+    deterministic: GuardrailDecision,
+    signal: AbortSignal,
+  ): Promise<GuardrailDecision> {
+    const semantic = this.options.semantic
+      ? await this.options.semantic.evaluate(input.text, { signal })
+      : this.options.semanticUnavailableReason
+        ? unavailableSemanticResult(input.text)
+        : undefined;
+    if (!semantic) return deterministic;
+    this.options.audit.appendSemantic(
+      input,
+      semantic,
+      this.options.policyVersion,
+    );
+    return { ...deterministic, semantic };
   }
 
   checkOutput(

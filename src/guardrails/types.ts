@@ -9,6 +9,47 @@ export const GUARDRAIL_CATEGORIES = [
 export type GuardrailCategory = (typeof GUARDRAIL_CATEGORIES)[number];
 export type GuardrailSeverity = "low" | "medium" | "high" | "critical";
 
+export type SemanticCheckStatus =
+  | "completed"
+  | "timed_out"
+  | "malformed"
+  | "errored"
+  | "queue_overflow";
+
+export interface SemanticCheckResult {
+  id: string;
+  status: SemanticCheckStatus;
+  attempts: number;
+  durationMs: number;
+  decision?: {
+    tripwire: boolean;
+    category: GuardrailCategory;
+    severity: GuardrailSeverity;
+    ruleId: string;
+  };
+}
+
+export type SemanticGuardrailOutcome =
+  | "passed"
+  | "would_block"
+  | "blocked"
+  | "unavailable"
+  | "timed_out"
+  | "malformed"
+  | "errored"
+  | "queue_overflow";
+
+export interface SemanticGuardrailAggregate {
+  mode: "shadow" | "enforce";
+  outcome: SemanticGuardrailOutcome;
+  enforcement: "allowed" | "blocked";
+  failureAction: "open" | "closed";
+  requestHash: string;
+  durationMs: number;
+  highestSeverity?: GuardrailSeverity;
+  checks: SemanticCheckResult[];
+}
+
 export interface NormalizedGuardrailInput {
   text: string;
   source: "cli" | "feishu" | "cron" | "child";
@@ -56,6 +97,7 @@ export interface GuardrailDecision {
   requestHash: string;
   durationMs: number;
   findings: GuardrailFinding[];
+  semantic?: SemanticGuardrailAggregate;
 }
 
 export interface GuardrailSummary {

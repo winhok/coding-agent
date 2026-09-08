@@ -5,6 +5,7 @@ import type {
   NormalizedGuardrailInput,
   NormalizedGuardrailOutput,
   NormalizedGuardrailTool,
+  SemanticGuardrailAggregate,
 } from "./types.js";
 
 export interface GuardrailAuditRecord {
@@ -13,11 +14,15 @@ export interface GuardrailAuditRecord {
   tool?: string;
   source: NormalizedGuardrailInput["source"];
   role: NormalizedGuardrailInput["role"];
-  outcome: GuardrailDecision["outcome"];
+  outcome: GuardrailDecision["outcome"] | SemanticGuardrailAggregate["outcome"];
   policyVersion: string;
   requestHash: string;
   durationMs: number;
   findings: GuardrailDecision["findings"];
+  semantic?: Pick<
+    SemanticGuardrailAggregate,
+    "mode" | "enforcement" | "failureAction" | "highestSeverity" | "checks"
+  >;
 }
 
 export class GuardrailAuditStore {
@@ -48,6 +53,41 @@ export class GuardrailAuditStore {
       durationMs: decision.durationMs,
       findings: decision.findings,
     };
+    this.store(record);
+  }
+
+  appendSemantic(
+    input: NormalizedGuardrailInput,
+    semantic: SemanticGuardrailAggregate,
+    policyVersion: string,
+  ): void {
+    this.store({
+      timestamp: new Date().toISOString(),
+      stage: "input",
+      source: input.source,
+      role: input.role,
+      outcome: semantic.outcome,
+      policyVersion,
+      requestHash: semantic.requestHash,
+      durationMs: semantic.durationMs,
+      findings: [],
+      semantic: {
+        mode: semantic.mode,
+        enforcement: semantic.enforcement,
+        failureAction: semantic.failureAction,
+        ...(semantic.highestSeverity
+          ? { highestSeverity: semantic.highestSeverity }
+          : {}),
+        checks: semantic.checks,
+      },
+    });
+  }
+
+  list(): readonly GuardrailAuditRecord[] {
+    return this.records;
+  }
+
+  private store(record: GuardrailAuditRecord): void {
     this.records.push(record);
     if (this.records.length > this.capacity) this.records.shift();
     if (!this.file) return;
@@ -55,9 +95,5 @@ export class GuardrailAuditStore {
     fs.appendFileSync(this.file, `${JSON.stringify(record)}\n`, {
       mode: 0o600,
     });
-  }
-
-  list(): readonly GuardrailAuditRecord[] {
-    return this.records;
   }
 }
