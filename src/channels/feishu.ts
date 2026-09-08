@@ -1,5 +1,7 @@
 import type {
   ChannelDefinition,
+  ChannelReviewAction,
+  ChannelReviewActionResult,
   ChannelSendReceipt,
   IncomingMessage,
   OutgoingMessage,
@@ -24,6 +26,11 @@ interface FeishuReceiveEvent {
     mentions?: Array<{ key: string }>;
   };
   sender: { sender_id?: { open_id?: string } };
+}
+
+interface FeishuCardActionEvent {
+  open_id: string;
+  action: { value?: Record<string, unknown> };
 }
 
 /** Convert Feishu transport fields without conflating reply trees with topics. */
@@ -61,6 +68,27 @@ export function mapFeishuIncomingMessage(
   };
 }
 
+export function mapFeishuReviewAction(
+  data: FeishuCardActionEvent,
+  accountId: string,
+): ChannelReviewAction | undefined {
+  const value = data.action.value;
+  if (
+    value?.action !== "guardrail_approve" ||
+    typeof value.token !== "string" ||
+    typeof value.conversationId !== "string" ||
+    !data.open_id
+  ) {
+    return undefined;
+  }
+  return {
+    accountId,
+    actorId: data.open_id,
+    conversationId: value.conversationId,
+    token: value.token,
+  };
+}
+
 export class FeishuChannel implements ChannelDefinition {
   name = "feishu";
   description = "飞书 Bot 消息通道（长连接模式）";
@@ -71,6 +99,9 @@ export class FeishuChannel implements ChannelDefinition {
 
   private config: FeishuConfig;
   private messageHandler?: (msg: IncomingMessage) => void;
+  private reviewHandler?: (
+    action: ChannelReviewAction,
+  ) => ChannelReviewActionResult | Promise<ChannelReviewActionResult>;
   private wsClient?: InstanceType<
     typeof import("@larksuiteoapi/node-sdk").WSClient
   >;
@@ -89,12 +120,30 @@ export class FeishuChannel implements ChannelDefinition {
     };
   }
 
+  authorizeReviewAction(action: ChannelReviewAction) {
+    const allowed = this.config.allowedSenders ?? [];
+    return allowed.includes(action.actorId)
+      ? { allowed: true as const }
+      : {
+          allowed: false as const,
+          reason: `actor ${action.actorId} is not in the Feishu allowlist`,
+        };
+  }
+
   constructor(config: FeishuConfig) {
     this.config = config;
   }
 
   onMessage(handler: (msg: IncomingMessage) => void): void {
     this.messageHandler = handler;
+  }
+
+  onReviewAction(
+    handler: (
+      action: ChannelReviewAction,
+    ) => ChannelReviewActionResult | Promise<ChannelReviewActionResult>,
+  ): void {
+    this.reviewHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -125,6 +174,19 @@ export class FeishuChannel implements ChannelDefinition {
         const message = mapFeishuIncomingMessage(data, this.config.appId);
         if (message && this.messageHandler) await this.messageHandler(message);
       },
+      "card.action.trigger": async (data: FeishuCardActionEvent) => {
+        const action = mapFeishuReviewAction(data, this.config.appId);
+        if (!action || !this.reviewHandler) {
+          return { toast: { type: "error", content: "审批操作无效。" } };
+        }
+        const result = await this.reviewHandler(action);
+        return {
+          toast: {
+            type: result.accepted ? "success" : "error",
+            content: result.message,
+          },
+        };
+      },
     });
 
     const wsClient = new lark.WSClient({
@@ -148,12 +210,39 @@ export class FeishuChannel implements ChannelDefinition {
     }
 
     try {
-      const content = JSON.stringify({ text: message.text });
+      const content = message.review
+        ? JSON.stringify({
+            config: { wide_screen_mode: true },
+            header: {
+              template: "orange",
+              title: { tag: "plain_text", content: "Guardrail Owner 审批" },
+            },
+            elements: [
+              { tag: "markdown", content: message.text },
+              {
+                tag: "action",
+                actions: [
+                  {
+                    tag: "button",
+                    text: { tag: "plain_text", content: "批准此请求" },
+                    type: "primary",
+                    value: {
+                      action: "guardrail_approve",
+                      token: message.review.token,
+                      conversationId: message.conversationId,
+                    },
+                  },
+                ],
+              },
+            ],
+          })
+        : JSON.stringify({ text: message.text });
+      const msgType = message.review ? "interactive" : "text";
       const response = message.replyToMessageId
         ? await this.larkClient.im.message.reply({
             path: { message_id: message.replyToMessageId },
             data: {
-              msg_type: "text",
+              msg_type: msgType,
               content,
               ...(message.replyInThread ? { reply_in_thread: true } : {}),
             },
@@ -162,7 +251,7 @@ export class FeishuChannel implements ChannelDefinition {
             params: { receive_id_type: "chat_id" },
             data: {
               receive_id: message.conversationId,
-              msg_type: "text",
+              msg_type: msgType,
               content,
             },
           });

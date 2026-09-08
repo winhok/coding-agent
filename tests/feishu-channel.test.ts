@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   FeishuChannel,
   mapFeishuIncomingMessage,
+  mapFeishuReviewAction,
 } from "../src/channels/feishu.ts";
 import { ChannelSendError } from "../src/channels/types.ts";
 
@@ -194,5 +195,50 @@ describe("feishu channel delivery", () => {
       (error: unknown) =>
         error instanceof ChannelSendError && error.certainty === "unknown",
     );
+  });
+
+  it("maps identity-bound review callbacks and sends review as an interactive card", async () => {
+    const action = mapFeishuReviewAction(
+      {
+        open_id: "ou_owner",
+        action: {
+          value: {
+            action: "guardrail_approve",
+            token: "review-token",
+            conversationId: "chat-1",
+          },
+        },
+      },
+      "app",
+    );
+    assert.deepEqual(action, {
+      accountId: "app",
+      actorId: "ou_owner",
+      conversationId: "chat-1",
+      token: "review-token",
+    });
+
+    const requests: unknown[] = [];
+    const channel = channelWithClient({
+      im: {
+        message: {
+          create: async (request) => {
+            requests.push(request);
+            return { data: { message_id: "card-1" } };
+          },
+          reply: async () => ({ data: { message_id: "unused" } }),
+        },
+      },
+    });
+    await channel.send({
+      conversationId: "chat-1",
+      text: "需要审批",
+      deliveryId: "delivery-review",
+      review: { token: "review-token", expiresAt: "2030-01-01T00:00:00.000Z" },
+    });
+
+    assert.match(JSON.stringify(requests), /"msg_type":"interactive"/);
+    assert.match(JSON.stringify(requests), /guardrail_approve/);
+    assert.match(JSON.stringify(requests), /review-token/);
   });
 });

@@ -2,6 +2,8 @@ const SENSITIVE_KEY =
   /(?:authorization|cookie|password|secret|token|api[_-]?key)/i;
 const CREDENTIAL_PATTERN =
   /(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,}|AKIA[0-9A-Z]{16}|bearer\s+[a-z0-9._~+/=-]{16,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/gi;
+const LABELED_PII_PATTERN =
+  /(?:(?:e-?mail|邮箱)\s*[:=]\s*[\w.+-]+@[\w.-]+\.[a-z]{2,}|(?:phone|mobile|电话|手机号)\s*[:=]\s*\+?[0-9][0-9\s-]{7,})/gi;
 
 export function redactSensitiveValue(
   value: unknown,
@@ -11,7 +13,9 @@ export function redactSensitiveValue(
 ): unknown {
   if (SENSITIVE_KEY.test(key)) return "[REDACTED]";
   if (typeof value === "string") {
-    let redacted = value.replace(CREDENTIAL_PATTERN, "[REDACTED]");
+    let redacted = value
+      .replace(CREDENTIAL_PATTERN, "[REDACTED]")
+      .replace(LABELED_PII_PATTERN, "[REDACTED]");
     for (const secret of knownSecrets) {
       if (secret.length < 4) continue;
       redacted = redacted.split(secret).join("[REDACTED]");

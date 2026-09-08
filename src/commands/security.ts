@@ -1,3 +1,4 @@
+import type { OwnerReviewManager } from "../guardrails/review.js";
 import type { HookPipeline } from "../security/hooks.js";
 import type { Role } from "../security/roles.js";
 import type { ToolRegistry } from "../tools/registry.js";
@@ -6,8 +7,33 @@ import type { CommandHandler } from "./index.js";
 export function createSecurityCommands(
   registry: ToolRegistry,
   hookPipeline: HookPipeline,
+  review?: {
+    manager: OwnerReviewManager;
+    actorId: string;
+    conversationId: string;
+    policyVersion: string;
+  },
 ): CommandHandler[] {
   return [
+    (cmd, _ctx) => {
+      const match = cmd.match(/^\/guardrail\s+approve\s+([A-Za-z0-9_-]+)$/);
+      if (!match) return false;
+      if (!review || registry.getRole() !== "owner") {
+        console.log("\n[guardrail] 仅 Owner 可处理审批。\n");
+        return true;
+      }
+      const approved = review.manager.approve(match[1] ?? "", {
+        actorId: review.actorId,
+        conversationId: review.conversationId,
+        policyVersion: review.policyVersion,
+      });
+      console.log(
+        approved
+          ? "\n[guardrail] 审批已绑定到该请求；仅可消费一次。\n"
+          : "\n[guardrail] 审批 token 无效、已使用、已过期或绑定不匹配。\n",
+      );
+      return true;
+    },
     // /role [owner|collaborator|guest]
     (cmd, _ctx) => {
       const match = cmd.match(/^\/role(?:\s+(owner|collaborator|guest))?$/);

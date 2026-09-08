@@ -1,5 +1,9 @@
 import type { LanguageModel, ModelMessage } from "ai";
-import { type AgentLoopResult, agentLoop } from "../agent/loop.js";
+import {
+  type AgentLoopResult,
+  agentLoop,
+  type OutputGuardrailOptions,
+} from "../agent/loop.js";
 import type { AgentRunContext } from "../agent/run-context.js";
 import { terminalAgentEventSink } from "../agent/terminal-event-sink.js";
 import {
@@ -15,6 +19,7 @@ import {
   PromptSnapshotState,
   renderPromptSnapshot,
 } from "../context/prompt-builder.js";
+import type { OwnerReviewManager } from "../guardrails/review.js";
 import { extendGuardrailRunState } from "../guardrails/run-state.js";
 import type { GuardrailService } from "../guardrails/service.js";
 import {
@@ -36,6 +41,8 @@ import {
 } from "./store.js";
 import {
   type ChannelDefinition,
+  type ChannelReviewAction,
+  type ChannelReviewActionResult,
   ChannelSendError,
   type ChannelStatus,
   type IncomingMessage,
@@ -45,6 +52,7 @@ interface RunChannelTurnOptions {
   messages: ModelMessage[];
   runContext: AgentRunContext;
   system: string;
+  outputGuardrail?: OutputGuardrailOptions;
 }
 
 interface GatewayOptions {
@@ -63,6 +71,13 @@ interface GatewayOptions {
   ) => Promise<CompactionResult>;
   maxConversationRuntimeStates?: number;
   guardrails?: GuardrailService;
+  createOutputGuardrail?: (context: {
+    actorId: string;
+    conversationId: string;
+    requestHash: string;
+  }) => OutputGuardrailOptions;
+  reviews?: OwnerReviewManager;
+  policyVersion?: string;
 }
 
 export interface ChannelInfo {
@@ -123,6 +138,35 @@ export class ChannelGateway {
         throw error;
       }
     });
+    channel.onReviewAction?.((action) =>
+      this.handleReviewAction(channel.name, action),
+    );
+  }
+
+  async handleReviewAction(
+    channelName: string,
+    action: ChannelReviewAction,
+  ): Promise<ChannelReviewActionResult> {
+    const channel = this.channels.get(channelName);
+    if (!channel || action.accountId !== channel.accountId) {
+      return { accepted: false, message: "审批操作无效。" };
+    }
+    const authorization = await channel.authorizeReviewAction?.(action);
+    if (!authorization?.allowed) {
+      return { accepted: false, message: "仅 Owner 可处理该审批。" };
+    }
+    const accepted =
+      this.options.reviews?.approve(action.token, {
+        actorId: action.actorId,
+        conversationId: action.conversationId,
+        policyVersion: this.options.policyVersion ?? "",
+      }) ?? false;
+    return {
+      accepted,
+      message: accepted
+        ? "审批已绑定到该请求，仅可消费一次。"
+        : "审批已失效、已处理或绑定不匹配。",
+    };
   }
 
   async startAll(): Promise<void> {
@@ -317,6 +361,14 @@ export class ChannelGateway {
             )
             .catch(() => undefined);
         }
+        const outputGuardrail =
+          inputGuardrail && this.options.createOutputGuardrail
+            ? this.options.createOutputGuardrail({
+                actorId: turn.message.senderId,
+                conversationId: turn.message.conversationId,
+                requestHash: inputGuardrail.requestHash,
+              })
+            : undefined;
         const inputMessages = [...snapshotMessages, userMessage];
         this.store.appendTurnMessages(
           turn.conversationKey,
@@ -346,7 +398,12 @@ export class ChannelGateway {
         let result: AgentLoopResult;
         try {
           result = await this.runTurn(
-            { messages: context.messages, runContext, system },
+            {
+              messages: context.messages,
+              runContext,
+              system,
+              ...(outputGuardrail ? { outputGuardrail } : {}),
+            },
             () => {
               uncommittedToolActivity = true;
             },
@@ -363,7 +420,12 @@ export class ChannelGateway {
           if (retrySafe) {
             try {
               result = await this.runTurn(
-                { messages: context.messages, runContext, system },
+                {
+                  messages: context.messages,
+                  runContext,
+                  system,
+                  ...(outputGuardrail ? { outputGuardrail } : {}),
+                },
                 () => {
                   uncommittedToolActivity = true;
                 },
@@ -407,6 +469,14 @@ export class ChannelGateway {
           ),
           result.text,
           nextTurnPosition,
+          result.guardrails?.output?.review?.token
+            ? {
+                review: {
+                  token: result.guardrails.output.review.token,
+                  expiresAt: result.guardrails.output.review.expiresAt,
+                },
+              }
+            : {},
         );
         if (outbox) this.scheduleDelivery(outbox);
       } catch (error) {
@@ -572,19 +642,21 @@ export class ChannelGateway {
       system: options.system,
       runContext: options.runContext,
       onStepCompleted,
-      ...(this.options.guardrails
-        ? {
-            outputGuardrail: {
-              check: async (text: string) =>
-                this.options.guardrails?.checkOutput({
-                  text,
-                  source: "feishu",
-                  role: "owner",
-                }),
-              replacement: safeOutputReplacement,
-            },
-          }
-        : {}),
+      ...(options.outputGuardrail
+        ? { outputGuardrail: options.outputGuardrail }
+        : this.options.guardrails
+          ? {
+              outputGuardrail: {
+                check: async (text: string) =>
+                  this.options.guardrails?.checkOutput({
+                    text,
+                    source: "feishu",
+                    role: "owner",
+                  }),
+                replacement: safeOutputReplacement,
+              },
+            }
+          : {}),
       eventSink: async (event) => {
         if (event.type === "tool_started") onToolActivity();
         await terminalAgentEventSink(event);

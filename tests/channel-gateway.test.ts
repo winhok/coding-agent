@@ -24,6 +24,7 @@ import {
 } from "../src/channels/types.ts";
 import type { PromptAssembly } from "../src/context/prompt-builder.ts";
 import { GuardrailAuditStore } from "../src/guardrails/audit.ts";
+import { OwnerReviewManager } from "../src/guardrails/review.ts";
 import { GuardrailService } from "../src/guardrails/service.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
 import {
@@ -47,6 +48,14 @@ class TestChannel implements ChannelDefinition {
   }
 
   stop(): void {}
+
+  authorizeReviewAction(
+    action: import("../src/channels/types.ts").ChannelReviewAction,
+  ) {
+    return action.actorId === "user-1"
+      ? { allowed: true as const }
+      : { allowed: false as const, reason: "not owner" };
+  }
 
   async send(message: OutgoingMessage): Promise<ChannelSendReceipt> {
     if (this.sendError) throw this.sendError;
@@ -138,6 +147,63 @@ function createGateway(
 }
 
 describe("channel gateway", () => {
+  it("accepts a Feishu review only from the bound Owner identity", async () => {
+    const reviews = new OwnerReviewManager();
+    const binding = {
+      actorId: "user-1",
+      conversationId: "chat-1",
+      requestHash: "request-1",
+      policyVersion: "policy-1",
+    };
+    const review = reviews.create(
+      {
+        outcome: "blocked",
+        policyVersion: "policy-1",
+        requestHash: "request-1",
+        durationMs: 1,
+        findings: [
+          {
+            category: "sensitive_data",
+            severity: "medium",
+            ruleId: "SEM-REVIEW",
+            evidence: "[redacted]",
+            mandatory: false,
+          },
+        ],
+      },
+      binding,
+    );
+    const registry = new ToolRegistry();
+    const gateway = new ChannelGateway({
+      model: {} as LanguageModel,
+      registry,
+      createRunContext: () => createTestRunContext(registry),
+      buildPrompt: () => ({ system: "system", snapshots: [], sections: [] }),
+      store: new ChannelStore(":memory:"),
+      reviews,
+      policyVersion: "policy-1",
+    });
+    gateway.register(new TestChannel());
+
+    const denied = await gateway.handleReviewAction("test", {
+      accountId: "account-1",
+      actorId: "attacker",
+      conversationId: "chat-1",
+      token: review.token,
+    });
+    const accepted = await gateway.handleReviewAction("test", {
+      accountId: "account-1",
+      actorId: "user-1",
+      conversationId: "chat-1",
+      token: review.token,
+    });
+
+    assert.equal(denied.accepted, false);
+    assert.equal(accepted.accepted, true);
+    assert.equal(reviews.consume(review.token, binding), true);
+    await gateway.stopAll();
+  });
+
   it("atomically rejects unsafe Feishu input without normal history or model execution", async () => {
     const dir = makeTempDir("channel-guardrail-input-");
     const statePath = join(dir, "state.sqlite");

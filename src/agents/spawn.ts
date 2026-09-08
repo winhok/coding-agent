@@ -1,5 +1,9 @@
 import type { LanguageModel, ModelMessage } from "ai";
-import { type AgentEvent, agentLoop } from "../agent/loop.js";
+import {
+  type AgentEvent,
+  agentLoop,
+  type OutputGuardrailOptions,
+} from "../agent/loop.js";
 import {
   type AgentRunContext,
   deriveAgentRunContext,
@@ -38,6 +42,10 @@ export interface SpawnContextBase {
   traceDirectory?: string;
   projectRules?: string;
   guardrails?: GuardrailService;
+  createOutputGuardrail?: (context: {
+    runId: string;
+    requestHash: string;
+  }) => OutputGuardrailOptions;
 }
 
 export interface SpawnContext extends SpawnContextBase {
@@ -275,20 +283,30 @@ export async function spawnAgent(
       ...(trace ? { trace } : {}),
       maxSteps: MAX_STEPS,
       forceFinalStep: true,
-      ...(ctx.guardrails
+      ...(ctx.createOutputGuardrail
         ? {
-            outputGuardrail: {
-              check: async (text: string) =>
-                ctx.guardrails?.checkOutput({
-                  text,
-                  source: "child",
-                  role: "owner",
-                  conversationId: runId,
-                }),
-              replacement: safeOutputReplacement,
-            },
+            outputGuardrail: ctx.createOutputGuardrail({
+              runId,
+              requestHash:
+                childInputDecision?.requestHash ??
+                guardrailState?.requestHashes.at(-1) ??
+                "",
+            }),
           }
-        : {}),
+        : ctx.guardrails
+          ? {
+              outputGuardrail: {
+                check: async (text: string) =>
+                  ctx.guardrails?.checkOutput({
+                    text,
+                    source: "child",
+                    role: "owner",
+                    conversationId: runId,
+                  }),
+                replacement: safeOutputReplacement,
+              },
+            }
+          : {}),
     });
     void loopPromise.catch(() => undefined);
     const result = await raceWithAbort(loopPromise, signal);

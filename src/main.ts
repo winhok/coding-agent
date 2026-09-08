@@ -3,11 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateObject, type ModelMessage } from "ai";
+import { generateObject, generateText, type ModelMessage } from "ai";
 import {
   type AgentEventSink,
   type AgentLoopResult,
   agentLoop,
+  type OutputGuardrailOptions,
 } from "./agent/loop.ts";
 import {
   type AgentRunContext,
@@ -66,6 +67,7 @@ import {
 } from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
 import { GuardrailAuditStore } from "./guardrails/audit.js";
+import { OwnerReviewManager } from "./guardrails/review.js";
 import { extendGuardrailRunState } from "./guardrails/run-state.js";
 import {
   SemanticGuardrailResultSchema,
@@ -239,6 +241,67 @@ const guardrails = new GuardrailService({
 const model = createModel(config.model, apiKey);
 
 const registry = new ToolRegistry();
+const ownerReviews = new OwnerReviewManager();
+
+function createOutputGuardrail(options: {
+  source: "cli" | "feishu" | "cron" | "child";
+  actorId: string;
+  conversationId: string;
+  requestHash?: string;
+  allowReview: boolean;
+  cronReview?: boolean;
+}): OutputGuardrailOptions {
+  return {
+    check: async (text) =>
+      guardrails.checkOutput({
+        text,
+        source: options.source,
+        role: registry.getRole(),
+        conversationId: options.conversationId,
+      }),
+    replacement: safeOutputReplacement,
+    redact: (value) => guardrails.redactActivity(value),
+    repair: async ({ candidate, ruleIds, signal }) => {
+      const result = await generateText({
+        model,
+        system:
+          "你是安全改写器。不得调用工具，只保留完成用户目标所需的非敏感内容。不要补充新事实。",
+        prompt: `风险规则：${ruleIds.join(", ")}\n\n已脱敏候选内容：\n${candidate}`,
+        abortSignal: signal,
+        maxOutputTokens: 600,
+        maxRetries: 0,
+      });
+      return result.text;
+    },
+    ...(options.cronReview
+      ? {
+          requestReview: () => ({
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+            message: "定时任务输出需要 Owner 审批，已暂停等待人工处理。",
+          }),
+        }
+      : options.allowReview && registry.getRole() === "owner"
+        ? {
+            requestReview: (decision) => {
+              const review = ownerReviews.create(decision, {
+                actorId: options.actorId,
+                conversationId: options.conversationId,
+                requestHash: options.requestHash ?? decision.requestHash,
+                policyVersion: decision.policyVersion,
+              });
+              return {
+                ...review,
+                message:
+                  options.source === "cli"
+                    ? `输出需要 Owner 审批。请执行：/guardrail approve ${review.token}`
+                    : "输出需要 Owner 审批，请使用下方交互按钮处理。",
+              };
+            },
+          }
+        : {}),
+  };
+}
+
 registry.register(...allTools);
 registry.register(createToolSearchTool());
 
@@ -552,6 +615,24 @@ export async function startAgent(
       tracker,
       ...(projectRules ? { projectRules } : {}),
       ...(config.guardrails.enabled ? { guardrails } : {}),
+      ...(config.guardrails.enabled
+        ? {
+            createOutputGuardrail: ({
+              runId,
+              requestHash,
+            }: {
+              runId: string;
+              requestHash: string;
+            }) =>
+              createOutputGuardrail({
+                source: "child",
+                actorId: "owner",
+                conversationId: runId,
+                requestHash,
+                allowReview: false,
+              }),
+          }
+        : {}),
     };
   }
 
@@ -573,6 +654,28 @@ export async function startAgent(
           ? path.join(config.channels.dataDir, "state.sqlite")
           : ":memory:",
         ...(config.guardrails.enabled ? { guardrails } : {}),
+        ...(config.guardrails.enabled
+          ? {
+              createOutputGuardrail: ({
+                actorId,
+                conversationId,
+                requestHash,
+              }: {
+                actorId: string;
+                conversationId: string;
+                requestHash: string;
+              }) =>
+                createOutputGuardrail({
+                  source: "feishu",
+                  actorId,
+                  conversationId,
+                  requestHash,
+                  allowReview: true,
+                }),
+              reviews: ownerReviews,
+              policyVersion: config.guardrails.policyVersion,
+            }
+          : {}),
       }),
   );
 
@@ -594,7 +697,12 @@ export async function startAgent(
     ...createSkillCommands(skillLoader),
     ...createPluginCommands(pluginManager, availablePlugins),
     ...(gateway ? createChannelCommands(gateway) : []),
-    ...createSecurityCommands(registry, hookPipeline),
+    ...createSecurityCommands(registry, hookPipeline, {
+      manager: ownerReviews,
+      actorId: `cli:${config.session.id}`,
+      conversationId: config.session.id,
+      policyVersion: config.guardrails.policyVersion,
+    }),
     ...(cronService ? createCronCommands(cronService) : []),
     ...createAgentCommands(agentRegistry),
   ]);
@@ -686,22 +794,21 @@ export async function startAgent(
           runContext,
           ...(config.guardrails.enabled
             ? {
-                outputGuardrail: {
-                  check: async (text: string) =>
-                    guardrails.checkOutput({
-                      text,
-                      source: "cron",
-                      role: registry.getRole(),
-                    }),
-                  replacement: safeOutputReplacement,
-                },
+                outputGuardrail: createOutputGuardrail({
+                  source: "cron",
+                  actorId: "cron",
+                  conversationId: `cron:${config.session.id}`,
+                  allowReview: false,
+                  cronReview: true,
+                }),
               }
             : {}),
           eventSink: terminalAgentEventSink,
         });
         return {
-          status:
-            result.guardrails?.output?.outcome === "blocked"
+          status: result.guardrails?.output?.review
+            ? "review_required"
+            : result.guardrails?.output?.outcome === "blocked"
               ? "blocked"
               : "completed",
           output: result.text || "(无输出)",
@@ -948,18 +1055,15 @@ export async function startAgent(
               },
             }
           : {}),
-        ...(config.guardrails.enabled
+        ...(config.guardrails.enabled && inputGuardrail
           ? {
-              outputGuardrail: {
-                check: async (text: string) =>
-                  guardrails.checkOutput({
-                    text,
-                    source: "cli",
-                    role: registry.getRole(),
-                    conversationId: config.session.id,
-                  }),
-                replacement: safeOutputReplacement,
-              },
+              outputGuardrail: createOutputGuardrail({
+                source: "cli",
+                actorId: `cli:${config.session.id}`,
+                conversationId: config.session.id,
+                requestHash: inputGuardrail.requestHash,
+                allowReview: options.mode === "interactive",
+              }),
             }
           : {}),
         trace,

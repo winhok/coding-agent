@@ -26,6 +26,19 @@ export interface OutgoingMessage {
   text: string;
   /** Stable local delivery intent identifier. */
   deliveryId: string;
+  review?: { token: string; expiresAt: string };
+}
+
+export interface ChannelReviewAction {
+  accountId: string;
+  actorId: string;
+  conversationId: string;
+  token: string;
+}
+
+export interface ChannelReviewActionResult {
+  accepted: boolean;
+  message: string;
 }
 
 export interface ChannelSendReceipt {
@@ -70,6 +83,14 @@ export interface ChannelDefinition {
   authorize?(
     message: IncomingMessage,
   ): ChannelAuthorization | Promise<ChannelAuthorization>;
+  authorizeReviewAction?(
+    action: ChannelReviewAction,
+  ): ChannelAuthorization | Promise<ChannelAuthorization>;
 
   onMessage?: (handler: (msg: IncomingMessage) => void | Promise<void>) => void;
+  onReviewAction?: (
+    handler: (
+      action: ChannelReviewAction,
+    ) => ChannelReviewActionResult | Promise<ChannelReviewActionResult>,
+  ) => void;
 }

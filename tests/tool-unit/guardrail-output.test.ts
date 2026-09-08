@@ -71,6 +71,28 @@ describe("final output guardrail", () => {
     assert.match(stored, /"stage":"output"/);
   });
 
+  it("marks labeled contact data as a non-mandatory medium-risk repair candidate", () => {
+    const service = new GuardrailService({
+      enabled: true,
+      policyVersion: "test-v1",
+      audit: new GuardrailAuditStore(),
+    });
+
+    const decision = service.checkOutput({
+      text: "email: learner@example.com",
+      source: "cli",
+      role: "owner",
+    });
+
+    assert.equal(decision?.outcome, "blocked");
+    assert.equal(decision?.findings[0]?.severity, "medium");
+    assert.equal(decision?.findings[0]?.mandatory, false);
+    assert.equal(
+      service.redactActivity("email: learner@example.com"),
+      "[REDACTED]",
+    );
+  });
+
   it("holds passing text until validation and releases the unchanged deltas once", async () => {
     const check = deferred<GuardrailDecision>();
     const candidateSeen = deferred<void>();
@@ -209,6 +231,132 @@ describe("final output guardrail", () => {
     assert.doesNotMatch(JSON.stringify(messages), /sk-synthetic_/);
     assert.doesNotMatch(JSON.stringify(events), /sk-synthetic_/);
   });
+
+  it("repairs low-risk output once with redacted text and rechecks it without tools", async () => {
+    const events: AgentEvent[] = [];
+    const registry = new ToolRegistry();
+    let checks = 0;
+    let repairs = 0;
+    let toolCalls = 0;
+    registry.register({
+      name: "should_not_run",
+      description: "repair must not have tools",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => {
+        toolCalls++;
+        return "ran";
+      },
+    });
+    const result = await agentLoop({
+      model: textModel("candidate-private-text"),
+      registry,
+      messages: [{ role: "user", content: "answer" }],
+      system: "test",
+      runContext: createTestRunContext(registry),
+      outputGuardrail: {
+        check: async () => {
+          checks++;
+          return checks === 1 ? riskDecision("medium", false) : PASSED;
+        },
+        repair: async ({ candidate, ruleIds }) => {
+          repairs++;
+          assert.equal(candidate, "[REDACTED-CANDIDATE]");
+          assert.deepEqual(ruleIds, ["SEM-LOW"]);
+          return "repaired answer";
+        },
+        redact: () => "[REDACTED-CANDIDATE]",
+        replacement: () => "blocked",
+      },
+      eventSink: (event) => {
+        events.push(event);
+      },
+    });
+
+    assert.equal(checks, 2);
+    assert.equal(repairs, 1);
+    assert.equal(toolCalls, 0);
+    assert.equal(result.text, "repaired answer");
+    assert.equal(result.guardrails?.output?.repair, "passed");
+    assert.equal(
+      events
+        .filter((event) => event.type === "text_delta")
+        .map((event) => event.text)
+        .join(""),
+      "repaired answer",
+    );
+  });
+
+  it("never repairs or reviews mandatory high-risk output", async () => {
+    const registry = new ToolRegistry();
+    let repairs = 0;
+    let reviews = 0;
+    const result = await agentLoop({
+      model: textModel("dangerous"),
+      registry,
+      messages: [{ role: "user", content: "answer" }],
+      system: "test",
+      runContext: createTestRunContext(registry),
+      outputGuardrail: {
+        check: async () => riskDecision("high", true),
+        repair: async () => {
+          repairs++;
+          return "repaired";
+        },
+        requestReview: () => {
+          reviews++;
+          return {
+            token: "token",
+            expiresAt: new Date().toISOString(),
+            message: "review",
+          };
+        },
+        redact: (value) => value,
+        replacement: () => "hard blocked",
+      },
+    });
+
+    assert.equal(result.text, "hard blocked");
+    assert.equal(repairs, 0);
+    assert.equal(reviews, 0);
+  });
+
+  it("requests bounded Owner review after one failed medium-risk repair", async () => {
+    const registry = new ToolRegistry();
+    let repairs = 0;
+    const messages = [{ role: "user" as const, content: "answer" }];
+    const result = await agentLoop({
+      model: textModel("review candidate"),
+      registry,
+      messages,
+      system: "test",
+      runContext: createTestRunContext(registry),
+      outputGuardrail: {
+        check: async () => riskDecision("medium", false),
+        repair: async () => {
+          repairs++;
+          return "still reviewable";
+        },
+        requestReview: () => ({
+          token: "review-token",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          message: "Review with token review-token",
+        }),
+        redact: (value) => value,
+        replacement: () => "blocked",
+      },
+    });
+
+    assert.equal(repairs, 1);
+    assert.equal(result.text, "Review with token review-token");
+    assert.deepEqual(result.guardrails?.output?.review, {
+      token: "review-token",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    });
+    assert.equal(result.guardrails?.output?.repair, "failed");
+    assert.doesNotMatch(JSON.stringify(messages), /review-token/);
+    assert.match(JSON.stringify(messages), /REVIEW_TOKEN_ISSUED/);
+  });
 });
 
 function textModel(text: string) {
@@ -265,4 +413,25 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function riskDecision(
+  severity: "medium" | "high",
+  mandatory: boolean,
+): GuardrailDecision {
+  return {
+    outcome: "blocked",
+    policyVersion: "test-v1",
+    requestHash: "review-request",
+    durationMs: 1,
+    findings: [
+      {
+        category: "sensitive_data",
+        severity,
+        ruleId: "SEM-LOW",
+        evidence: "[redacted]",
+        mandatory,
+      },
+    ],
+  };
 }

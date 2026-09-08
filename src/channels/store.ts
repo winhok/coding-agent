@@ -694,6 +694,7 @@ export class ChannelStore {
     assistantMessages: readonly ModelMessage[],
     replyText: string,
     startPosition = 1,
+    options: { review?: OutgoingMessage["review"] } = {},
   ): OutboxEntry | undefined {
     const complete = this.db.transaction(() => {
       this.assertLeaseOwned();
@@ -717,6 +718,7 @@ export class ChannelStore {
             : {}),
           text: replyText,
           deliveryId: id,
+          ...(options.review ? { review: options.review } : {}),
         };
         const now = Date.now();
         this.db

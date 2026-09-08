@@ -6,6 +6,7 @@ import {
   streamText,
 } from "ai";
 import { InputEffectGate } from "../guardrails/input-gate.js";
+import { isReviewable } from "../guardrails/review.js";
 import {
   type GuardrailDecision,
   type GuardrailSummary,
@@ -55,12 +56,25 @@ export interface AgentLoopOptions {
     check: (signal: AbortSignal) => Promise<GuardrailDecision | undefined>;
     cancellationConvergenceTimeoutMs?: number;
   };
-  outputGuardrail?: {
-    check: (
-      text: string,
-      signal: AbortSignal,
-    ) => Promise<GuardrailDecision | undefined>;
-    replacement: (decision: GuardrailDecision) => string;
+  outputGuardrail?: OutputGuardrailOptions;
+}
+
+export interface OutputGuardrailOptions {
+  check: (
+    text: string,
+    signal: AbortSignal,
+  ) => Promise<GuardrailDecision | undefined>;
+  replacement: (decision: GuardrailDecision) => string;
+  repair?: (input: {
+    candidate: string;
+    ruleIds: string[];
+    signal: AbortSignal;
+  }) => Promise<string>;
+  redact?: (value: unknown) => unknown;
+  requestReview?: (decision: GuardrailDecision) => {
+    token?: string;
+    expiresAt: string;
+    message: string;
   };
 }
 
@@ -339,24 +353,20 @@ async function runAgentLoopCore({
       if (shouldBreak) {
         await runContext.inputEffectGate?.wait(runContext.signal);
         if (outputGuardrail) {
-          const decision = await outputGuardrail.check(
+          const guarded = await resolveGuardedOutput(
             fullText,
+            [],
+            bufferedTextEvents,
+            step,
+            outputGuardrail,
             runContext.signal,
           );
-          if (decision) {
-            if (!outputGuardrailSummary || decision.outcome === "blocked") {
-              outputGuardrailSummary = decisionSummary(decision);
-            }
-            if (decision.outcome === "blocked") {
-              fullText = outputGuardrail.replacement(decision);
-              bufferedTextEvents.splice(0, bufferedTextEvents.length, {
-                type: "text_delta",
-                step,
-                text: fullText,
-              });
-            }
-          }
-          await flushEvents(bufferedTextEvents, eventSink);
+          fullText = guarded.text;
+          outputGuardrailSummary = mergeOutputSummary(
+            outputGuardrailSummary,
+            guarded.summary,
+          );
+          await flushEvents(guarded.events, eventSink);
         }
         finalText = fullText;
         termination = "loop_detected";
@@ -377,24 +387,25 @@ async function runAgentLoopCore({
           ) as ModelMessage[])
         : stepResponse.messages;
       if (outputGuardrail) {
-        const decision = await outputGuardrail.check(
+        const guarded = await resolveGuardedOutput(
           fullText,
+          responseMessages,
+          bufferedTextEvents,
+          step,
+          outputGuardrail,
           runContext.signal,
         );
-        if (decision) {
-          if (!outputGuardrailSummary || decision.outcome === "blocked") {
-            outputGuardrailSummary = decisionSummary(decision);
-          }
-          if (decision.outcome === "blocked") {
-            fullText = outputGuardrail.replacement(decision);
-            responseMessages = replaceAssistantText(responseMessages, fullText);
-            bufferedTextEvents.splice(0, bufferedTextEvents.length, {
-              type: "text_delta",
-              step,
-              text: fullText,
-            });
-          }
-        }
+        fullText = guarded.text;
+        responseMessages = guarded.messages;
+        outputGuardrailSummary = mergeOutputSummary(
+          outputGuardrailSummary,
+          guarded.summary,
+        );
+        bufferedTextEvents.splice(
+          0,
+          bufferedTextEvents.length,
+          ...guarded.events,
+        );
       }
       await flushEvents(bufferedTextEvents, eventSink);
 
@@ -409,7 +420,10 @@ async function runAgentLoopCore({
       totalUsage.cacheWriteTokens += norm.cacheWriteTokens;
       await trace?.recordStepCompleted({
         step,
-        text: fullText,
+        text: redactReviewToken(
+          fullText,
+          outputGuardrailSummary?.review?.token,
+        ),
         outputMessages: responseMessages,
         usage: norm,
       });
@@ -515,6 +529,98 @@ function decisionSummary(
     requestHash: decision.requestHash,
     durationMs: decision.durationMs,
     categories: decision.findings.map((finding) => finding.category),
+  };
+}
+
+async function resolveGuardedOutput(
+  text: string,
+  messages: ModelMessage[],
+  events: Parameters<AgentEventSink>[0][],
+  step: number,
+  guardrail: OutputGuardrailOptions,
+  signal: AbortSignal,
+): Promise<{
+  text: string;
+  messages: ModelMessage[];
+  events: Parameters<AgentEventSink>[0][];
+  summary?: NonNullable<GuardrailSummary["output"]>;
+}> {
+  let decision = await guardrail.check(text, signal);
+  if (!decision) return { text, messages, events };
+  let summary = decisionSummary(decision);
+  if (decision.outcome !== "blocked") {
+    return { text, messages, events, summary };
+  }
+
+  if (isReviewable(decision) && guardrail.repair) {
+    try {
+      const redacted = String(guardrail.redact?.(text) ?? text).slice(0, 4_000);
+      const repaired = await guardrail.repair({
+        candidate: redacted,
+        ruleIds: decision.findings.map((finding) => finding.ruleId),
+        signal,
+      });
+      signal.throwIfAborted();
+      const repairedDecision = await guardrail.check(repaired, signal);
+      if (!repairedDecision || repairedDecision.outcome === "passed") {
+        return {
+          text: repaired,
+          messages: replaceAssistantText(messages, repaired),
+          events: [{ type: "text_delta", step, text: repaired }],
+          summary: {
+            ...(repairedDecision
+              ? decisionSummary(repairedDecision)
+              : decisionSummary({ ...decision, outcome: "passed" })),
+            repair: "passed",
+          },
+        };
+      }
+      decision = repairedDecision;
+      summary = { ...decisionSummary(decision), repair: "failed" };
+    } catch {
+      signal.throwIfAborted();
+      summary = { ...summary, repair: "failed" };
+    }
+  }
+
+  const review = isReviewable(decision)
+    ? guardrail.requestReview?.(decision)
+    : undefined;
+  const replacement = review?.message ?? guardrail.replacement(decision);
+  const historyReplacement = redactReviewToken(replacement, review?.token);
+  return {
+    text: replacement,
+    messages: replaceAssistantText(messages, historyReplacement),
+    events: [{ type: "text_delta", step, text: replacement }],
+    summary: {
+      ...summary,
+      ...(review
+        ? {
+            review: {
+              ...(review.token ? { token: review.token } : {}),
+              expiresAt: review.expiresAt,
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+function redactReviewToken(text: string, token: string | undefined): string {
+  return token ? text.split(token).join("[REVIEW_TOKEN_ISSUED]") : text;
+}
+
+function mergeOutputSummary(
+  current: GuardrailSummary["output"],
+  next: GuardrailSummary["output"],
+): GuardrailSummary["output"] {
+  if (!next) return current;
+  if (!current) return next;
+  if (current.outcome === "blocked") return current;
+  return {
+    ...next,
+    ...(current.repair ? { repair: current.repair } : {}),
+    ...(current.review ? { review: current.review } : {}),
   };
 }
 

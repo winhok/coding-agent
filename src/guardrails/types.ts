@@ -95,7 +95,7 @@ export interface GuardrailFinding {
   severity: GuardrailSeverity;
   ruleId: string;
   evidence: string;
-  mandatory: true;
+  mandatory: boolean;
 }
 
 export interface GuardrailDecision {
@@ -114,6 +114,8 @@ export interface GuardrailSummary {
   };
   output?: Omit<GuardrailDecision, "findings"> & {
     categories: GuardrailCategory[];
+    repair?: "passed" | "failed";
+    review?: { token?: string; expiresAt: string };
   };
 }
 
