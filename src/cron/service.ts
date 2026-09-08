@@ -346,13 +346,25 @@ export class CronService {
           };
         }
         if (deterministic) {
-          void this.options.guardrails
-            .checkSemanticInput(
+          if (this.options.guardrails.isSemanticEnforced()) {
+            deterministic = await this.options.guardrails.checkSemanticInput(
               { text: payload.prompt, source: "cron", role: "owner" },
               deterministic,
               new AbortController().signal,
-            )
-            .catch(() => undefined);
+            );
+            if (deterministic.outcome === "blocked") {
+              return {
+                status: "blocked",
+                output: safeCronInputRejection(deterministic),
+              };
+            }
+          } else {
+            this.options.guardrails.observeSemanticInput(
+              { text: payload.prompt, source: "cron", role: "owner" },
+              deterministic,
+              new AbortController().signal,
+            );
+          }
         }
       }
       const raw = await this.executor.runAgentPrompt(payload.prompt, timeout);

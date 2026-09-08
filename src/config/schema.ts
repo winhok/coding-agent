@@ -194,18 +194,35 @@ export const UsageConfigSchema = z.object({
   trackingFile: z.string().default(".usage/today.jsonl"),
 });
 
-export const SemanticGuardrailConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  mode: z.literal("shadow").default("shadow"),
-  model: z.string().trim().default(""),
-  baseURL: z.string().trim().default(""),
-  apiKey: z.string().default(""),
-  timeoutMs: z.number().int().positive().max(30_000).default(3_000),
-  maxOutputTokens: z.number().int().min(64).max(1_000).default(300),
-  retries: z.number().int().min(0).max(1).default(1),
-  concurrency: z.number().int().positive().max(20).default(2),
-  queueSize: z.number().int().min(0).max(10_000).default(100),
-});
+export const SemanticGuardrailConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    mode: z.enum(["shadow", "enforce"]).default("shadow"),
+    model: z.string().trim().default(""),
+    baseURL: z.string().trim().default(""),
+    apiKey: z.string().default(""),
+    timeoutMs: z.number().int().positive().max(30_000).default(3_000),
+    maxOutputTokens: z.number().int().min(64).max(1_000).default(300),
+    retries: z.number().int().min(0).max(1).default(1),
+    concurrency: z.number().int().positive().max(20).default(2),
+    queueSize: z.number().int().min(0).max(10_000).default(100),
+    promotionReport: z
+      .object({
+        path: z.string().trim().min(1),
+        corpusPath: z.string().trim().min(1),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .optional(),
+  })
+  .superRefine((semantic, context) => {
+    if (semantic.mode === "enforce" && !semantic.promotionReport) {
+      context.addIssue({
+        code: "custom",
+        path: ["promotionReport"],
+        message: "Enforcement requires a bound promotion report",
+      });
+    }
+  });
 
 export const GuardrailConfigSchema = z.object({
   enabled: z.boolean().default(true),

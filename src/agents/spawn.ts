@@ -172,6 +172,29 @@ export async function spawnAgent(
       ctx.agentRegistry.block(runId, rejection);
       return rejection;
     }
+    if (childInputDecision && ctx.guardrails.isSemanticEnforced()) {
+      childInputDecision = await ctx.guardrails.checkSemanticInput(
+        {
+          text: request.task,
+          source: "child",
+          role: "owner",
+          conversationId: ctx.parentRunContext.runId,
+        },
+        childInputDecision,
+        ctx.parentRunContext.signal,
+      );
+      if (childInputDecision.outcome === "blocked") {
+        const rejection = safeChildInputRejection();
+        ctx.guardrails.recordTerminal({
+          source: "child",
+          role: "owner",
+          outcome: "blocked",
+          requestHash: childInputDecision.requestHash,
+        });
+        ctx.agentRegistry.block(runId, rejection);
+        return rejection;
+      }
+    }
   }
 
   const timeout =
@@ -211,19 +234,21 @@ export async function spawnAgent(
       : {}),
     ...(guardrailState ? { guardrailState } : {}),
   });
-  if (childInputDecision && ctx.guardrails) {
-    void ctx.guardrails
-      .checkSemanticInput(
-        {
-          text: request.task,
-          source: "child",
-          role: "owner",
-          conversationId: runId,
-        },
-        childInputDecision,
-        signal,
-      )
-      .catch(() => undefined);
+  if (
+    childInputDecision &&
+    ctx.guardrails &&
+    !ctx.guardrails.isSemanticEnforced()
+  ) {
+    ctx.guardrails.observeSemanticInput(
+      {
+        text: request.task,
+        source: "child",
+        role: "owner",
+        conversationId: runId,
+      },
+      childInputDecision,
+      signal,
+    );
   }
   const prompt = buildSubAgentPrompt(
     resolved.name,

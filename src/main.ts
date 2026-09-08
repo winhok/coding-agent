@@ -67,6 +67,7 @@ import {
 } from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
 import { GuardrailAuditStore } from "./guardrails/audit.js";
+import { validatePromotionEvidence } from "./guardrails/evaluation.js";
 import { OwnerReviewManager } from "./guardrails/review.js";
 import { extendGuardrailRunState } from "./guardrails/run-state.js";
 import {
@@ -157,6 +158,29 @@ function createSemanticGuardrail(
   | { runner?: SemanticGuardrailRunner; unavailableReason?: string }
   | undefined {
   if (!semanticConfig.enabled) return undefined;
+  if (semanticConfig.mode === "enforce") {
+    const promotion = semanticConfig.promotionReport;
+    if (!promotion) {
+      throw new Error("Semantic enforcement requires promotion evidence");
+    }
+    validatePromotionEvidence({
+      reportFile: promotion.path,
+      sha256: promotion.sha256,
+      policyVersion: config.guardrails.policyVersion,
+      corpusFile: promotion.corpusPath,
+      classifierConfig: {
+        model: semanticConfig.model || modelConfig.name,
+        baseURL: semanticConfig.baseURL || modelConfig.baseURL,
+        timeoutMs: semanticConfig.timeoutMs,
+        maxOutputTokens: semanticConfig.maxOutputTokens,
+        retries: semanticConfig.retries,
+        concurrency: semanticConfig.concurrency,
+        queueSize: semanticConfig.queueSize,
+        promptVersion: 1,
+        classifiers: ["semantic-injection", "semantic-sensitive-action"],
+      },
+    });
+  }
   try {
     const semanticApiKey = semanticConfig.apiKey || defaultApiKey;
     if (semanticApiKey.startsWith("${")) {
@@ -732,6 +756,10 @@ export async function startAgent(
       },
       { name: "cron", close: () => cronService?.stop() },
       { name: "channels", close: () => gateway?.stopAll() },
+      {
+        name: "guardrail observations",
+        close: () => guardrails.settleSemanticObservations(),
+      },
       { name: "plugins", close: () => pluginManager.unloadAll() },
       { name: "mcp", close: () => registry.closeAllMCP() },
       { name: "vector store", close: () => vectorStore?.close() },
@@ -933,6 +961,16 @@ export async function startAgent(
     let inputGuardrail: GuardrailDecision | undefined;
     try {
       inputGuardrail = guardrails.checkInput(normalizedGuardrailInput);
+      if (inputGuardrail && guardrails.isSemanticEnforced()) {
+        inputGuardrail = await guardrails.checkSemanticInput(
+          normalizedGuardrailInput,
+          inputGuardrail,
+          runtimeController.signal,
+        );
+        if (inputGuardrail.outcome === "blocked") {
+          throw new InputTripwireError(inputGuardrail);
+        }
+      }
     } catch (error) {
       if (!(error instanceof InputTripwireError)) throw error;
       guardrails.recordTerminal({
@@ -983,14 +1021,12 @@ export async function startAgent(
         inputGuardrail,
       );
     }
-    if (inputGuardrail) {
-      void guardrails
-        .checkSemanticInput(
-          normalizedGuardrailInput,
-          inputGuardrail,
-          runContext.signal,
-        )
-        .catch(() => undefined);
+    if (inputGuardrail && !guardrails.isSemanticEnforced()) {
+      guardrails.observeSemanticInput(
+        normalizedGuardrailInput,
+        inputGuardrail,
+        runContext.signal,
+      );
     }
     const promptAssembly = buildPromptFor(runContext);
     const modePolicy = resolveCliModePolicy(

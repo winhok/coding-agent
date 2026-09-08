@@ -215,6 +215,43 @@ describe("semantic guardrail shadow runner", () => {
     });
     await active;
   });
+
+  it("settles tracked Shadow observations before runtime shutdown", async () => {
+    const result = deferred<unknown>();
+    const audit = new GuardrailAuditStore();
+    const runner = runnerFor(async () => result.promise);
+    const service = new GuardrailService({
+      enabled: true,
+      policyVersion: "test-v1",
+      audit,
+      semantic: runner,
+    });
+    const input = {
+      text: "summarize",
+      source: "cli" as const,
+      role: "owner" as const,
+    };
+    const deterministic = service.checkInput(input);
+    assert.ok(deterministic);
+    service.observeSemanticInput(
+      input,
+      deterministic,
+      new AbortController().signal,
+    );
+    const settled = service.settleSemanticObservations();
+    result.resolve({
+      tripwire: false,
+      category: "prompt_injection",
+      severity: "low",
+      ruleId: "SEM-PASS",
+    });
+    await settled;
+
+    assert.equal(
+      audit.list().some((record) => record.semantic?.mode === "shadow"),
+      true,
+    );
+  });
 });
 
 function runnerFor(

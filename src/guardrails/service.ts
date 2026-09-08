@@ -28,6 +28,8 @@ export interface GuardrailServiceOptions {
 }
 
 export class GuardrailService {
+  private readonly pendingSemantic = new Set<Promise<unknown>>();
+
   constructor(private readonly options: GuardrailServiceOptions) {}
 
   checkInput(input: NormalizedGuardrailInput): GuardrailDecision | undefined {
@@ -66,7 +68,59 @@ export class GuardrailService {
       semantic,
       this.options.policyVersion,
     );
+    if (semantic.enforcement === "blocked") {
+      const findings = semantic.checks.flatMap((check) =>
+        check.status === "completed" && check.decision?.tripwire
+          ? [
+              {
+                category: check.decision.category,
+                severity: check.decision.severity,
+                ruleId: check.decision.ruleId,
+                evidence: `[redacted:${check.decision.category}]`,
+                mandatory: false,
+              },
+            ]
+          : [],
+      );
+      return {
+        ...deterministic,
+        outcome: "blocked",
+        findings: [...deterministic.findings, ...findings],
+        semantic,
+      };
+    }
     return { ...deterministic, semantic };
+  }
+
+  observeSemanticInput(
+    input: NormalizedGuardrailInput,
+    deterministic: GuardrailDecision,
+    signal: AbortSignal,
+  ): void {
+    const observation = this.checkSemanticInput(input, deterministic, signal);
+    this.pendingSemantic.add(observation);
+    void observation
+      .catch(() => undefined)
+      .finally(() => this.pendingSemantic.delete(observation));
+  }
+
+  async settleSemanticObservations(timeoutMs = 10_000): Promise<void> {
+    if (this.pendingSemantic.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this.pendingSemantic]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  isSemanticEnforced(): boolean {
+    return this.options.semantic?.mode === "enforce";
   }
 
   checkOutput(

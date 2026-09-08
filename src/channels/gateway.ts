@@ -236,12 +236,23 @@ export class ChannelGateway {
 
     if (this.options.guardrails) {
       try {
-        this.options.guardrails.checkInput({
+        const normalized = {
           text: message.text,
-          source: "feishu",
-          role: "owner",
+          source: "feishu" as const,
+          role: "owner" as const,
           conversationId: message.conversationId,
-        });
+        };
+        let decision = this.options.guardrails.checkInput(normalized);
+        if (decision && this.options.guardrails.isSemanticEnforced()) {
+          decision = await this.options.guardrails.checkSemanticInput(
+            normalized,
+            decision,
+            new AbortController().signal,
+          );
+          if (decision.outcome === "blocked") {
+            throw new InputTripwireError(decision);
+          }
+        }
       } catch (error) {
         if (!(error instanceof InputTripwireError)) throw error;
         this.options.guardrails.recordTerminal({
@@ -331,12 +342,26 @@ export class ChannelGateway {
         let inputGuardrail: GuardrailDecision | undefined;
         if (this.options.guardrails) {
           try {
-            inputGuardrail = this.options.guardrails.checkInput({
+            const normalized = {
               text: turn.message.text,
-              source: "feishu",
-              role: "owner",
+              source: "feishu" as const,
+              role: "owner" as const,
               conversationId: turn.message.conversationId,
-            });
+            };
+            inputGuardrail = this.options.guardrails.checkInput(normalized);
+            if (
+              inputGuardrail &&
+              this.options.guardrails.isSemanticEnforced()
+            ) {
+              inputGuardrail = await this.options.guardrails.checkSemanticInput(
+                normalized,
+                inputGuardrail,
+                runContext.signal,
+              );
+              if (inputGuardrail.outcome === "blocked") {
+                throw new InputTripwireError(inputGuardrail);
+              }
+            }
           } catch (error) {
             if (!(error instanceof InputTripwireError)) throw error;
             this.options.guardrails.recordTerminal({
@@ -360,8 +385,8 @@ export class ChannelGateway {
             undefined,
             inputGuardrail,
           );
-          void this.options.guardrails
-            .checkSemanticInput(
+          if (!this.options.guardrails.isSemanticEnforced()) {
+            this.options.guardrails.observeSemanticInput(
               {
                 text: turn.message.text,
                 source: "feishu",
@@ -370,8 +395,8 @@ export class ChannelGateway {
               },
               inputGuardrail,
               runContext.signal,
-            )
-            .catch(() => undefined);
+            );
+          }
         }
         const outputGuardrail =
           inputGuardrail && this.options.createOutputGuardrail

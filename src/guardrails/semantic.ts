@@ -60,6 +60,10 @@ export class SemanticGuardrailRunner {
 
   constructor(private readonly options: SemanticGuardrailRunnerOptions) {}
 
+  get mode(): SemanticGuardrailRunnerOptions["mode"] {
+    return this.options.mode;
+  }
+
   async evaluate(
     text: string,
     options: { signal?: AbortSignal; risk?: GuardrailSeverity } = {},
