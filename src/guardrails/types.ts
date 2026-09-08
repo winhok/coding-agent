@@ -35,13 +35,17 @@ export interface GuardrailDecision {
 export interface GuardrailSummary {
   input?: Omit<GuardrailDecision, "findings"> & {
     categories: GuardrailCategory[];
+    cancellation?: "complete" | "incomplete";
   };
 }
 
 export class InputTripwireError extends Error {
   readonly name = "InputTripwireError";
 
-  constructor(readonly decision: GuardrailDecision) {
+  constructor(
+    readonly decision: GuardrailDecision,
+    readonly cancellation: "complete" | "incomplete" = "complete",
+  ) {
     super(
       "请求触发了安全保护，未交给模型处理。请移除绕过策略、敏感信息或未经授权的高风险操作后重试。",
     );

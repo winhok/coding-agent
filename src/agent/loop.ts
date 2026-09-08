@@ -5,6 +5,13 @@ import {
   type ModelMessage,
   streamText,
 } from "ai";
+import { InputEffectGate } from "../guardrails/input-gate.js";
+import {
+  type GuardrailDecision,
+  type GuardrailSummary,
+  InputTripwireError,
+} from "../guardrails/types.js";
+import { raceWithAbort } from "../security/abort.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { LocalTraceRecorder } from "../trace/recorder.js";
 import {
@@ -43,6 +50,11 @@ export interface AgentLoopOptions {
   maxSteps?: number;
   maxRetries?: number;
   forceFinalStep?: boolean;
+  inputGuardrail?: {
+    mode: "blocking" | "parallel";
+    check: (signal: AbortSignal) => Promise<GuardrailDecision | undefined>;
+    cancellationConvergenceTimeoutMs?: number;
+  };
 }
 
 const EMPTY_USAGE: StepUsage = {
@@ -52,7 +64,82 @@ const EMPTY_USAGE: StepUsage = {
   cacheWriteTokens: 0,
 };
 
-export async function agentLoop({
+const DEFAULT_CANCELLATION_CONVERGENCE_TIMEOUT_MS = 2_000;
+
+export async function agentLoop(
+  options: AgentLoopOptions,
+): Promise<AgentLoopResult> {
+  const { inputGuardrail, ...baseOptions } = options;
+  if (!inputGuardrail) return runAgentLoopCore(baseOptions);
+
+  const runController = new AbortController();
+  const runSignal = AbortSignal.any([
+    baseOptions.runContext.signal,
+    runController.signal,
+  ]);
+  const gate = new InputEffectGate();
+  const bufferedEvents: Parameters<AgentEventSink>[0][] = [];
+  const targetSink = baseOptions.eventSink;
+  let released = inputGuardrail.mode === "blocking";
+  let releasePromise = Promise.resolve();
+  const guardedSink: AgentEventSink = async (event) => {
+    if (!released) {
+      bufferedEvents.push(event);
+      return;
+    }
+    await releasePromise;
+    await targetSink?.(event);
+  };
+  const runContext: AgentRunContext = {
+    ...baseOptions.runContext,
+    signal: runSignal,
+    inputEffectGate: gate,
+  };
+  const coreOptions = { ...baseOptions, runContext, eventSink: guardedSink };
+  const check = raceWithAbort(
+    Promise.resolve().then(() => inputGuardrail.check(runSignal)),
+    runSignal,
+  ).then((decision) => {
+    if (decision?.outcome === "blocked") {
+      throw new InputTripwireError(decision);
+    }
+    return decision;
+  });
+
+  if (inputGuardrail.mode === "blocking") {
+    const decision = await check;
+    gate.pass();
+    return withInputSummary(await runAgentLoopCore(coreOptions), decision);
+  }
+
+  const core = runAgentLoopCore(coreOptions);
+  void core.catch(() => undefined);
+  let decision: GuardrailDecision | undefined;
+  try {
+    decision = await check;
+  } catch (error) {
+    gate.block(error);
+    runController.abort(error);
+    bufferedEvents.length = 0;
+    const converged = await settlesWithin(
+      core,
+      inputGuardrail.cancellationConvergenceTimeoutMs ??
+        DEFAULT_CANCELLATION_CONVERGENCE_TIMEOUT_MS,
+    );
+    if (error instanceof InputTripwireError && !converged) {
+      throw new InputTripwireError(error.decision, "incomplete");
+    }
+    throw error;
+  }
+
+  releasePromise = flushEvents(bufferedEvents.splice(0), targetSink);
+  released = true;
+  gate.pass();
+  await releasePromise;
+  return withInputSummary(await core, decision);
+}
+
+async function runAgentLoopCore({
   model,
   registry,
   messages,
@@ -66,7 +153,7 @@ export async function agentLoop({
   maxSteps = MAX_STEPS,
   maxRetries = MAX_RETRIES,
   forceFinalStep = false,
-}: AgentLoopOptions): Promise<AgentLoopResult> {
+}: Omit<AgentLoopOptions, "inputGuardrail">): Promise<AgentLoopResult> {
   let step = 0;
   let toolCalls = 0;
   let retries = 0;
@@ -234,6 +321,8 @@ export async function agentLoop({
         );
       }
 
+      await runContext.inputEffectGate?.wait(runContext.signal);
+
       const responseMessages = stepResponse.messages;
       messages.push(...responseMessages);
       appendedMessages.push(...responseMessages);
@@ -296,6 +385,48 @@ export async function agentLoop({
   };
   await emit({ type: "run_finished", result });
   return result;
+}
+
+async function flushEvents(
+  events: Parameters<AgentEventSink>[0][],
+  sink: AgentEventSink | undefined,
+): Promise<void> {
+  for (const event of events) await sink?.(event);
+}
+
+async function settlesWithin(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function withInputSummary(
+  result: AgentLoopResult,
+  decision: GuardrailDecision | undefined,
+): AgentLoopResult {
+  if (!decision) return result;
+  const input: NonNullable<GuardrailSummary["input"]> = {
+    outcome: decision.outcome,
+    policyVersion: decision.policyVersion,
+    requestHash: decision.requestHash,
+    durationMs: decision.durationMs,
+    categories: decision.findings.map((finding) => finding.category),
+  };
+  return { ...result, guardrails: { ...result.guardrails, input } };
 }
 
 export type {

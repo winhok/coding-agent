@@ -200,6 +200,13 @@ export const GuardrailConfigSchema = z.object({
   auditFile: z.string().trim().min(1).default(".guardrails/audit.jsonl"),
   auditCapacity: z.number().int().positive().max(100_000).default(1_000),
   mandatoryRules: z.literal(true).default(true),
+  inputMode: z.enum(["blocking", "parallel"]).default("parallel"),
+  cancellationConvergenceTimeoutMs: z
+    .number()
+    .int()
+    .positive()
+    .max(30_000)
+    .default(2_000),
 });
 
 export const SuperAgentConfigSchema = z.object({

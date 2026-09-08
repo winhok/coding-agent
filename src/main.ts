@@ -790,6 +790,16 @@ export async function startAgent(
           if (needsFollowUp) await compactIfNeeded();
         },
         ...(eventSink ? { eventSink } : {}),
+        ...(inputGuardrail
+          ? {
+              inputGuardrail: {
+                mode: config.guardrails.inputMode,
+                check: async () => inputGuardrail,
+                cancellationConvergenceTimeoutMs:
+                  config.guardrails.cancellationConvergenceTimeoutMs,
+              },
+            }
+          : {}),
         trace,
       });
       await trace.finish("completed");

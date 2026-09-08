@@ -98,6 +98,8 @@ export class ToolExecutionPipeline {
   ): Promise<string> {
     const startedAt = Date.now();
     executionContext.signal.throwIfAborted();
+    await executionContext.inputEffectGate?.wait(executionContext.signal);
+    executionContext.signal.throwIfAborted();
 
     if (hookPipeline) {
       const preResult = await hookPipeline.runPre(tool.name, input);
