@@ -150,6 +150,10 @@ export function safeCronInputRejection(decision: GuardrailDecision): string {
   return "定时任务违反当前安全策略，已被安全保护暂停。";
 }
 
+export function safeChildInputRejection(): string {
+  return "[sub-agent guardrail blocked] 子 Agent 任务触发安全保护，未启动模型或工具。";
+}
+
 function safeToolRejection(_decision: GuardrailDecision): string {
   return "该工具调用触发了安全保护，未执行。请移除敏感信息、越界路径或绕过内容后重试。";
 }

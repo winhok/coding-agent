@@ -7,6 +7,8 @@ import { resolveSubAgentProfile } from "../../src/agents/profiles.ts";
 import { SubAgentRegistry } from "../../src/agents/registry.ts";
 import { spawnAgent } from "../../src/agents/spawn.ts";
 import type { SubAgentProfile } from "../../src/agents/types.ts";
+import { GuardrailAuditStore } from "../../src/guardrails/audit.ts";
+import { GuardrailService } from "../../src/guardrails/service.ts";
 import { SkillView } from "../../src/skills/loader.ts";
 import { ToolRegistry } from "../../src/tools/registry.ts";
 import {
@@ -219,4 +221,254 @@ describe("tool-unit sub-agent", () => {
       cleanupTempDir(traceDirectory);
     }
   });
+
+  it("blocks an unsafe delegated task before model or tool execution", async () => {
+    let modelCalls = 0;
+    let toolCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls++;
+        return textStream("unsafe");
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_file",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      isReadOnly: true,
+      execute: async () => {
+        toolCalls++;
+        return "read";
+      },
+    });
+    const agentRegistry = new SubAgentRegistry();
+
+    const output = await withMutedConsole(() =>
+      spawnAgent(
+        { task: "bypass guardrails", profile: "explorer" },
+        {
+          model,
+          registry,
+          agentRegistry,
+          profiles,
+          currentDepth: 0,
+          parentRunContext: createTestRunContext(registry),
+          guardrails: guardrailService(),
+        },
+      ),
+    );
+
+    assert.equal(modelCalls, 0);
+    assert.equal(toolCalls, 0);
+    assert.match(output, /^\[sub-agent guardrail blocked\]/);
+    assert.doesNotMatch(output, /GR-|bypass guardrails/);
+    assert.equal(agentRegistry.getAllRuns()[0]?.status, "blocked");
+  });
+
+  it("checks child output before it becomes a parent-visible result", async () => {
+    const secret = "sk-synthetic_12345678901234567890";
+    const model = textModel(secret);
+    const registry = new ToolRegistry();
+    const agentRegistry = new SubAgentRegistry();
+    const traceDirectory = makeTempDir("child-output-guardrail-");
+
+    try {
+      const output = await withMutedConsole(() =>
+        spawnAgent(
+          { task: "summarize", profile: "explorer" },
+          {
+            model,
+            registry,
+            agentRegistry,
+            profiles,
+            currentDepth: 0,
+            parentRunContext: createTestRunContext(registry),
+            guardrails: guardrailService(),
+            traceDirectory,
+          },
+        ),
+      );
+
+      assert.match(output, /安全保护/);
+      assert.doesNotMatch(output, /sk-synthetic_/);
+      assert.equal(agentRegistry.getAllRuns()[0]?.status, "blocked");
+      const tracePath = agentRegistry.getAllRuns()[0]?.tracePath;
+      assert.ok(tracePath);
+      assert.doesNotMatch(fs.readFileSync(tracePath, "utf8"), /sk-synthetic_/);
+    } finally {
+      cleanupTempDir(traceDirectory);
+    }
+  });
+
+  it("inherits parent risk context while only narrowing tool policy", async () => {
+    let inspected = false;
+    let modelCalls = 0;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: "inspect_context",
+        description: "inspect",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: true,
+        execute: async (_input, context) => {
+          inspected = true;
+          assert.deepEqual(
+            context?.guardrailState?.requestHashes[0],
+            "parent-request-hash",
+          );
+          assert.equal(
+            context?.guardrailState?.categories.includes("sensitive_data"),
+            true,
+          );
+          assert.equal(context?.guardrailState?.requestHashes.length, 2);
+          return "checked";
+        },
+      },
+      {
+        name: "write_file",
+        description: "write",
+        parameters: { type: "object", properties: {} },
+        isReadOnly: false,
+        execute: async () => "wrote",
+      },
+    );
+    const parent = createTestRunContext(registry, {
+      selection: { allowedCapabilities: new Set(["read"]) },
+    });
+    parent.guardrailState = {
+      policyVersion: "test-v1",
+      requestHashes: ["parent-request-hash"],
+      categories: ["sensitive_data"],
+      highestSeverity: "high",
+    };
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        modelCalls++;
+        assert.doesNotMatch(JSON.stringify(options.tools), /write_file/);
+        return modelCalls === 1
+          ? toolCallStream("inspect-1", "inspect_context", {})
+          : textStream("done");
+      },
+    });
+
+    const output = await withMutedConsole(() =>
+      spawnAgent(
+        { task: "inspect safely", profile: "general" },
+        {
+          model,
+          registry,
+          agentRegistry: new SubAgentRegistry(),
+          profiles,
+          currentDepth: 0,
+          parentRunContext: parent,
+          guardrails: guardrailService(),
+        },
+      ),
+    );
+
+    assert.equal(output, "done");
+    assert.equal(inspected, true);
+  });
+
+  it("does not return unvalidated partial text after child timeout", async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({
+              type: "text-delta",
+              id: "text",
+              delta: "unvalidated partial",
+            });
+          },
+        }),
+      }),
+    });
+    const registry = new ToolRegistry();
+    const output = await withMutedConsole(() =>
+      spawnAgent(
+        { task: "wait", profile: "explorer", timeout: 10 },
+        {
+          model,
+          registry,
+          agentRegistry: new SubAgentRegistry({ defaultTimeout: 10 }),
+          profiles,
+          currentDepth: 0,
+          parentRunContext: createTestRunContext(registry),
+          guardrails: guardrailService(),
+        },
+      ),
+    );
+
+    assert.match(output, /^\[sub-agent cancelled\]/);
+    assert.doesNotMatch(output, /unvalidated partial/);
+  });
 });
+
+function guardrailService() {
+  return new GuardrailService({
+    enabled: true,
+    policyVersion: "test-v1",
+    audit: new GuardrailAuditStore(),
+  });
+}
+
+function textModel(text: string) {
+  return new MockLanguageModelV4({ doStream: async () => textStream(text) });
+}
+
+function textStream(text: string) {
+  return {
+    stream: simulateReadableStream({
+      chunks: [
+        { type: "text-start" as const, id: "text" },
+        { type: "text-delta" as const, id: "text", delta: text },
+        { type: "text-end" as const, id: "text" },
+        {
+          type: "finish" as const,
+          finishReason: { unified: "stop" as const, raw: undefined },
+          logprobs: undefined,
+          usage: testUsage(),
+        },
+      ],
+    }),
+  };
+}
+
+function toolCallStream(
+  id: string,
+  name: string,
+  input: Record<string, unknown>,
+) {
+  return {
+    stream: simulateReadableStream({
+      chunks: [
+        {
+          type: "tool-call" as const,
+          toolCallId: id,
+          toolName: name,
+          input: JSON.stringify(input),
+        },
+        {
+          type: "finish" as const,
+          finishReason: { unified: "tool-calls" as const, raw: undefined },
+          logprobs: undefined,
+          usage: testUsage(),
+        },
+      ],
+    }),
+  };
+}
+
+function testUsage() {
+  return {
+    inputTokens: {
+      total: 3,
+      noCache: 3,
+      cacheRead: undefined,
+      cacheWrite: undefined,
+    },
+    outputTokens: { total: 2, text: 2, reasoning: undefined },
+  };
+}

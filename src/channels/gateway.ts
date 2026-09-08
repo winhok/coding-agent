@@ -15,6 +15,7 @@ import {
   PromptSnapshotState,
   renderPromptSnapshot,
 } from "../context/prompt-builder.js";
+import { extendGuardrailRunState } from "../guardrails/run-state.js";
 import type { GuardrailService } from "../guardrails/service.js";
 import {
   safeInputRejection,
@@ -299,6 +300,10 @@ export class ChannelGateway {
           }
         }
         if (inputGuardrail && this.options.guardrails) {
+          runContext.guardrailState = extendGuardrailRunState(
+            undefined,
+            inputGuardrail,
+          );
           void this.options.guardrails
             .checkSemanticInput(
               {

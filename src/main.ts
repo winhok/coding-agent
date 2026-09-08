@@ -66,6 +66,7 @@ import {
 } from "./context/prompt-pipes.js";
 import { CronService } from "./cron/service.js";
 import { GuardrailAuditStore } from "./guardrails/audit.js";
+import { extendGuardrailRunState } from "./guardrails/run-state.js";
 import {
   SemanticGuardrailResultSchema,
   SemanticGuardrailRunner,
@@ -292,7 +293,9 @@ registry.setRole(config.security.defaultRole);
 
 // ── Cron Service ────────────────────────────────
 const cronService = config.cron.enabled
-  ? new CronService(config.cron.dataDir, { guardrails })
+  ? new CronService(config.cron.dataDir, {
+      ...(config.guardrails.enabled ? { guardrails } : {}),
+    })
   : undefined;
 if (cronService) registry.register(createCronTool(cronService));
 
@@ -548,6 +551,7 @@ export async function startAgent(
       currentDepth: 0,
       tracker,
       ...(projectRules ? { projectRules } : {}),
+      ...(config.guardrails.enabled ? { guardrails } : {}),
     };
   }
 
@@ -568,7 +572,7 @@ export async function startAgent(
         statePath: config.channels.feishu.enabled
           ? path.join(config.channels.dataDir, "state.sqlite")
           : ":memory:",
-        guardrails,
+        ...(config.guardrails.enabled ? { guardrails } : {}),
       }),
   );
 
@@ -656,6 +660,17 @@ export async function startAgent(
           "cron",
           false,
         );
+        const cronInputDecision = guardrails.checkInput({
+          text: prompt,
+          source: "cron",
+          role: registry.getRole(),
+        });
+        if (cronInputDecision) {
+          runContext.guardrailState = extendGuardrailRunState(
+            undefined,
+            cronInputDecision,
+          );
+        }
         const promptAssembly = buildPromptFor(runContext);
         const cronMessages: ModelMessage[] = [
           ...promptAssembly.snapshots
@@ -847,6 +862,12 @@ export async function startAgent(
       options.approvalMode,
     );
     const runContext = createRunContext(initialPolicy.toolSelection);
+    if (inputGuardrail) {
+      runContext.guardrailState = extendGuardrailRunState(
+        undefined,
+        inputGuardrail,
+      );
+    }
     if (inputGuardrail) {
       void guardrails
         .checkSemanticInput(

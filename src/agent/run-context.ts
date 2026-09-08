@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { InputEffectGate } from "../guardrails/input-gate.js";
-import type { RunToolGuardrail } from "../guardrails/types.js";
+import type {
+  GuardrailRunState,
+  RunToolGuardrail,
+} from "../guardrails/types.js";
 import type { RequestApproval } from "../security/permissions.js";
 import type { SkillView } from "../skills/loader.js";
 import type { ToolView } from "../tools/registry.js";
@@ -20,6 +23,7 @@ export interface AgentRunContext {
   requestApproval?: RequestApproval;
   inputEffectGate?: InputEffectGate;
   toolGuardrail?: RunToolGuardrail;
+  guardrailState?: GuardrailRunState;
 }
 
 export interface AgentRunContextOptions {
@@ -34,6 +38,7 @@ export interface AgentRunContextOptions {
   requestApproval?: RequestApproval;
   inputEffectGate?: InputEffectGate;
   toolGuardrail?: RunToolGuardrail;
+  guardrailState?: GuardrailRunState;
 }
 
 export function createAgentRunContext(
@@ -58,6 +63,9 @@ export function createAgentRunContext(
       ? { inputEffectGate: options.inputEffectGate }
       : {}),
     ...(options.toolGuardrail ? { toolGuardrail: options.toolGuardrail } : {}),
+    ...(options.guardrailState
+      ? { guardrailState: options.guardrailState }
+      : {}),
   };
 }
 
@@ -69,6 +77,8 @@ export interface ChildAgentRunContextOptions {
   toolView: ToolView;
   skillView?: SkillView;
   requestApproval?: RequestApproval;
+  toolGuardrail?: RunToolGuardrail;
+  guardrailState?: GuardrailRunState;
 }
 
 export function deriveAgentRunContext(
@@ -89,6 +99,11 @@ export function deriveAgentRunContext(
     ...(parent.inputEffectGate
       ? { inputEffectGate: parent.inputEffectGate }
       : {}),
-    ...(parent.toolGuardrail ? { toolGuardrail: parent.toolGuardrail } : {}),
+    ...((options.toolGuardrail ?? parent.toolGuardrail)
+      ? { toolGuardrail: options.toolGuardrail ?? parent.toolGuardrail }
+      : {}),
+    ...((options.guardrailState ?? parent.guardrailState)
+      ? { guardrailState: options.guardrailState ?? parent.guardrailState }
+      : {}),
   });
 }

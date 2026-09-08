@@ -9,6 +9,17 @@ import {
   PromptBuilder,
   renderPromptSnapshot,
 } from "../context/prompt-builder.js";
+import { extendGuardrailRunState } from "../guardrails/run-state.js";
+import {
+  type GuardrailService,
+  safeChildInputRejection,
+  safeOutputReplacement,
+} from "../guardrails/service.js";
+import {
+  type GuardrailDecision,
+  InputTripwireError,
+} from "../guardrails/types.js";
+import { raceWithAbort } from "../security/abort.js";
 import type { SkillView } from "../skills/loader.js";
 import type { ToolRegistry, ToolView } from "../tools/registry.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
@@ -26,6 +37,7 @@ export interface SpawnContextBase {
   tracker?: UsageTracker;
   traceDirectory?: string;
   projectRules?: string;
+  guardrails?: GuardrailService;
 }
 
 export interface SpawnContext extends SpawnContextBase {
@@ -33,6 +45,7 @@ export interface SpawnContext extends SpawnContextBase {
 }
 
 const MAX_STEPS = 30;
+const CANCELLATION_CONVERGENCE_TIMEOUT_MS = 1_000;
 
 const AGENT_COLORS = [
   "\x1b[36m",
@@ -120,6 +133,33 @@ export async function spawnAgent(
     startedAt: new Date().toISOString(),
   });
 
+  let childInputDecision: GuardrailDecision | undefined;
+  if (ctx.guardrails) {
+    try {
+      childInputDecision = ctx.guardrails.checkInput({
+        text: request.task,
+        source: "child",
+        role: "owner",
+        conversationId: ctx.parentRunContext.runId,
+      });
+    } catch (error) {
+      if (!(error instanceof InputTripwireError)) throw error;
+      const rejection = safeChildInputRejection();
+      ctx.agentRegistry.block(runId, rejection);
+      return rejection;
+    }
+    if (
+      childInputDecision &&
+      ctx.parentRunContext.guardrailState &&
+      childInputDecision.policyVersion !==
+        ctx.parentRunContext.guardrailState.policyVersion
+    ) {
+      const rejection = safeChildInputRejection();
+      ctx.agentRegistry.block(runId, rejection);
+      return rejection;
+    }
+  }
+
   const timeout =
     request.timeout || ctx.agentRegistry.getConfig().defaultTimeout;
   const controller = new AbortController();
@@ -135,12 +175,42 @@ export async function spawnAgent(
   const childToolView = ctx.parentRunContext.toolView.restrict(
     resolved.selection,
   );
+  const guardrailState = childInputDecision
+    ? extendGuardrailRunState(
+        ctx.parentRunContext.guardrailState,
+        childInputDecision,
+      )
+    : ctx.parentRunContext.guardrailState;
   const childRunContext = deriveAgentRunContext(ctx.parentRunContext, {
     runId,
     agentId: runId,
     signal,
     toolView: childToolView,
+    ...(ctx.guardrails
+      ? {
+          toolGuardrail: ctx.guardrails.createToolGuardrail({
+            source: "child",
+            role: "owner",
+            conversationId: runId,
+          }),
+        }
+      : {}),
+    ...(guardrailState ? { guardrailState } : {}),
   });
+  if (childInputDecision && ctx.guardrails) {
+    void ctx.guardrails
+      .checkSemanticInput(
+        {
+          text: request.task,
+          source: "child",
+          role: "owner",
+          conversationId: runId,
+        },
+        childInputDecision,
+        signal,
+      )
+      .catch(() => undefined);
+  }
   const prompt = buildSubAgentPrompt(
     resolved.name,
     resolved.profile,
@@ -157,6 +227,7 @@ export async function spawnAgent(
   ];
   let partialText = "";
   let trace: LocalTraceRecorder | undefined;
+  let loopPromise: Promise<Awaited<ReturnType<typeof agentLoop>>> | undefined;
 
   const eventSink = (event: AgentEvent): void => {
     switch (event.type) {
@@ -193,7 +264,7 @@ export async function spawnAgent(
     console.log(
       `  ${tag} 启动 [${resolved.name}${parallel ? ", 并行只读" : ""}]: ${request.task.slice(0, 50)}`,
     );
-    const result = await agentLoop({
+    loopPromise = agentLoop({
       model: ctx.model,
       registry: ctx.registry,
       messages,
@@ -204,31 +275,79 @@ export async function spawnAgent(
       ...(trace ? { trace } : {}),
       maxSteps: MAX_STEPS,
       forceFinalStep: true,
+      ...(ctx.guardrails
+        ? {
+            outputGuardrail: {
+              check: async (text: string) =>
+                ctx.guardrails?.checkOutput({
+                  text,
+                  source: "child",
+                  role: "owner",
+                  conversationId: runId,
+                }),
+              replacement: safeOutputReplacement,
+            },
+          }
+        : {}),
     });
+    void loopPromise.catch(() => undefined);
+    const result = await raceWithAbort(loopPromise, signal);
     const output = result.text || "(无输出)";
-    ctx.agentRegistry.complete(runId, output, result.stats);
-    await trace.finish("completed");
+    const outputBlocked = result.guardrails?.output?.outcome === "blocked";
+    if (outputBlocked) ctx.agentRegistry.block(runId, output);
+    else ctx.agentRegistry.complete(runId, output, result.stats);
+    await trace.finish(outputBlocked ? "blocked" : "completed");
     console.log(
-      `  ${tag} 完成 ✓ (${result.stats.steps} steps, ${result.stats.toolCalls} tools, ${output.length} 字符)`,
+      `  ${tag} ${outputBlocked ? "拦截" : "完成"} ${outputBlocked ? "!" : "✓"} (${result.stats.steps} steps, ${result.stats.toolCalls} tools, ${output.length} 字符)`,
     );
     return output;
   } catch (error) {
     const isAbort =
       (error instanceof Error && error.name === "AbortError") || signal.aborted;
-    const errorMessage = isAbort
+    const converged =
+      !isAbort || !loopPromise
+        ? true
+        : await settlesWithin(loopPromise, CANCELLATION_CONVERGENCE_TIMEOUT_MS);
+    const rawErrorMessage = isAbort
       ? timedOut
         ? `执行超时 (${timeout / 1000}s)`
         : "随父 Agent 运行取消"
       : error instanceof Error
         ? error.message
         : String(error);
+    const errorMessage = `${String(
+      ctx.guardrails?.redactActivity(rawErrorMessage) ?? rawErrorMessage,
+    )}${converged ? "" : "；取消未完全收敛"}`;
     ctx.agentRegistry.fail(runId, errorMessage, isAbort);
     await trace?.finish(isAbort ? "cancelled" : "failed", error);
     console.log(`  ${tag} ${isAbort ? "超时" : "失败"} ✗: ${errorMessage}`);
+    if (isAbort && ctx.guardrails) {
+      return `[sub-agent cancelled] ${errorMessage}`;
+    }
     if (isAbort && partialText) return `[部分结果] ${partialText}`;
     return `[sub-agent 执行失败] ${errorMessage}`;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function settlesWithin(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

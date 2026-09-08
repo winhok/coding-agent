@@ -59,6 +59,14 @@ export class SubAgentRegistry {
     run.finishedAt = new Date().toISOString();
   }
 
+  block(id: string, result: string): void {
+    const run = this.runs.get(id);
+    if (!run) return;
+    run.status = "blocked";
+    run.result = result;
+    run.finishedAt = new Date().toISOString();
+  }
+
   get(id: string): SubAgentRun | undefined {
     return this.runs.get(id);
   }

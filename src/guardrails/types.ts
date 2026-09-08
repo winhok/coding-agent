@@ -50,6 +50,13 @@ export interface SemanticGuardrailAggregate {
   checks: SemanticCheckResult[];
 }
 
+export interface GuardrailRunState {
+  policyVersion: string;
+  requestHashes: string[];
+  categories: GuardrailCategory[];
+  highestSeverity?: GuardrailSeverity;
+}
+
 export interface NormalizedGuardrailInput {
   text: string;
   source: "cli" | "feishu" | "cron" | "child";
