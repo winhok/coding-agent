@@ -83,7 +83,7 @@ export async function runCli(
     return CLI_EXIT.success;
   }
   if (request.command === "version") {
-    io.stdout(`coding-agent v${dependencies.version}\n`);
+    io.stdout(`runframe v${dependencies.version}\n`);
     return CLI_EXIT.success;
   }
   if (request.command === "init") {

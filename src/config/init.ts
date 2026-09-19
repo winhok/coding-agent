@@ -16,7 +16,7 @@ export async function runInit(): Promise<void> {
       rl.question("  > ", resolve);
     });
 
-  console.log("\n  Super Agent 初始化向导\n");
+  console.log("\n  Runframe 初始化向导\n");
 
   if (fs.existsSync(CONFIG_FILE)) {
     const overwrite = await ask(`  ${CONFIG_FILE} 已存在，覆盖? (y/N): `);

@@ -1,9 +1,9 @@
 {
-  "name": "coding-agent",
+  "name": "runframe",
   "version": "1.0.0",
-  "description": "",
+  "description": "A reusable TypeScript runtime for tool-using agents, with a coding agent as its reference implementation.",
   "main": "dist/index.js",
-  "bin": { "coding-agent": "dist/index.js" },
+  "bin": { "runframe": "dist/index.js" },
   "type": "module",
   "files": ["dist"],
   "scripts": {

@@ -74,7 +74,7 @@ function createHttpFetchWithTimeout(
 
 export class MCPClient {
   private client = new Client(
-    { name: "coding-agent", version: "1.0.0" },
+    { name: "runframe", version: "1.0.0" },
     { capabilities: {} },
   );
   private config: MCPClientConfig;
