@@ -1394,9 +1394,7 @@ export async function startAgent(
     }
   }
 
-  console.log(
-    'Runframe — Coding Agent reference application (type "/exit" to quit)',
-  );
+  console.log('coding-agent (type "/exit" to quit)');
   console.log("快捷命令：");
   console.log("  /cron            — 查看定时任务");
   console.log("  /cron logs       — 查看执行记录");

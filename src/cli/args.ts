@@ -112,14 +112,14 @@ export function parseCliArgs(args: readonly string[]): CliRequest {
 }
 
 export function formatHelp(version: string): string {
-  return `runframe v${version}
+  return `coding-agent v${version}
 
 用法:
-  runframe                          启动交互模式
-  runframe interactive [--continue] 显式启动交互模式
-  runframe ask <任务> [选项]         执行单次任务
-  runframe plan <任务> [选项]        只分析并生成计划
-  runframe init                     生成配置
+  coding-agent                          启动交互模式
+  coding-agent interactive [--continue] 显式启动交互模式
+  coding-agent ask <任务> [选项]         执行单次任务
+  coding-agent plan <任务> [选项]        只分析并生成计划
+  coding-agent init                     生成配置
 
 选项:
   --json                    只向 stdout 输出最终 JSON（ask/plan）

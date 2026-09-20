@@ -48,7 +48,7 @@ describe("CLI interface", () => {
     assert.match(help, /plan 在执行层只开放只读工具/);
     assert.match(help, /130 收到 SIGINT/);
     assert.match(help, /143 收到 SIGTERM/);
-    assert.match(help, /runframe v1\.2\.3/);
+    assert.match(help, /coding-agent v1\.2\.3/);
   });
 
   it("passes explicit execution policy to the runtime", async () => {

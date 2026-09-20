@@ -1,9 +1,9 @@
 {
-  "name": "runframe",
+  "name": "coding-agent",
   "version": "1.0.0",
-  "description": "A reusable TypeScript runtime for tool-using agents, with a coding agent as its reference implementation.",
+  "description": "A TypeScript coding agent application; core runtime development has moved to Knolume-runtime.",
   "main": "dist/index.js",
-  "bin": { "runframe": "dist/index.js" },
+  "bin": { "coding-agent": "dist/index.js" },
   "type": "module",
   "files": ["dist"],
   "scripts": {
