@@ -1,47 +1,49 @@
 # coding-agent
 
-基于 TypeScript 的 Coding Agent 应用，包含模型调用、工具执行、上下文管理、记忆、安全护栏，以及 CLI、飞书、定时任务和子 Agent 入口。
+English | [简体中文](README.zh-CN.md)
 
-> **归档计划与后续维护**：本仓库曾使用名称 **Runframe**，现统一更名为 **coding-agent**，将作为历史实现归档保留。核心运行时已迁移至 [Knolume-runtime](https://github.com/winhok/Knolume-runtime)，后续核心开发与维护以该仓库为准。需要集成或扩展运行时，请从新仓库开始；本仓库保留完整编码应用的实现，供学习和回顾。
+A TypeScript coding agent application with model and tool execution, context and memory management, guardrails, and CLI, Feishu, scheduled task, and sub-agent entry points.
 
-## 与 Knolume-runtime 的关系
+> **Maintenance status:** This repository preserves the historical coding agent application. No further development is planned here. Development and maintenance of the reusable core continue in [Knolume Runtime](https://github.com/winhok/Knolume-runtime). Start there for new runtime integrations.
 
-本仓库把运行时与应用组装放在同一个包中：`src/main.ts` 连接模型、工具、配置和各类入口，`src/index.ts` 启动 CLI。Knolume-runtime 将通用能力整理为独立的 `@knolume/runtime` 库，供宿主应用组合使用。
+## Relationship to Knolume Runtime
 
-| 能力 | coding-agent 中的历史实现 | Knolume-runtime 中的对应模块 |
+This repository combines the runtime and application wiring in one package: `src/main.ts` connects models, tools, configuration, and application entry points, while `src/index.ts` starts the CLI. Knolume Runtime extracts and develops the reusable capabilities as the separate `@knolume/runtime` library for host applications to compose.
+
+| Capability | Historical implementation here | Knolume Runtime counterpart |
 | --- | --- | --- |
-| Agent 循环、重试、循环检测和事件 | `src/agent/` | `src/harness/agent/`，通过 `AgentToolRuntime` 接口获取工具 |
-| 工具注册、执行、权限与审批 | `src/tools/`、`src/security/` | `src/tools/`，由宿主提供工具实现与权限策略 |
-| 上下文、记忆、检索与会话 | `src/context/`、`src/memory/`、`src/rag/`、`src/session/` | `src/harness/` 下的对应模块 |
-| Skills、子 Agent、轨迹与用量 | `src/skills/`、`src/agents/`、`src/trace/`、`src/usage/` | `src/harness/` 下的对应模块 |
-| 安全护栏 | `src/guardrails/` 中的应用策略与执行逻辑 | 通用护栏执行接口，具体规则、身份上下文和检查模型由宿主提供 |
-| 应用入口与传输 | CLI、飞书、Cron 和内置文件、Shell、Git 等工具 | 独立库及 `src/protocol/` 协议定义；应用入口、HTTP/SSE 服务和具体产品工具由宿主实现 |
+| Agent loop, retries, loop detection, and events | `src/agent/` | `src/harness/agent/`, using the `AgentToolRuntime` interface for tools |
+| Tool registration, execution, permissions, and approvals | `src/tools/`, `src/security/` | `src/tools/`; the host supplies tool implementations and permission policies |
+| Context, memory, retrieval, and sessions | `src/context/`, `src/memory/`, `src/rag/`, `src/session/` | Corresponding modules under `src/harness/` |
+| Skills, sub-agents, traces, and usage | `src/skills/`, `src/agents/`, `src/trace/`, `src/usage/` | Corresponding modules under `src/harness/` |
+| Guardrails | Application policies and execution logic in `src/guardrails/` | Reusable guardrail execution interfaces; the host supplies rules, identity context, and checker models |
+| Application entry points and transport | CLI, Feishu, Cron, and built-in file, shell, and Git tools | A library and protocol definitions in `src/protocol/`; the host implements entry points, HTTP/SSE services, and product tools |
 
-这里的迁移是核心能力的抽取与后续演进，不代表两个仓库的 API、配置文件或持久化数据格式可以直接互换。本仓库仍保留原有实现，没有改为依赖 `@knolume/runtime`；CLI、飞书和 Cron 也不是新库自带的应用入口。
+This is an extraction and continued development of core capabilities, **not** a drop-in migration: APIs, configuration, and persisted data formats are not assumed to be compatible. This repository retains its original implementation and does not depend on `@knolume/runtime`. The library does not include this application's CLI, Feishu, or Cron entry points.
 
-新项目请参考 [Knolume-runtime 的接入说明](https://github.com/winhok/Knolume-runtime#use-in-an-application) 和 [可运行示例](https://github.com/winhok/Knolume-runtime/tree/main/examples)。迁移现有应用时，需要按新库接口接入模型、提示词、工具、权限与审批，并单独核对会话、记忆和配置的兼容性。
+For new applications, see the [Knolume Runtime integration guide](https://github.com/winhok/Knolume-runtime#use-in-an-application) and [runnable example](https://github.com/winhok/Knolume-runtime/tree/main/examples). Existing applications need to adapt their models, prompts, tools, permissions, and approvals to the library API, and check session, memory, and configuration compatibility separately.
 
-## 本仓库保留的核心实现
+## What this repository preserves
 
-| 能力 | 实现位置 |
+| Capability | Implementation |
 | --- | --- |
-| Model loop：模型调用、工具调用循环、重试与循环检测 | `src/agent/`、`src/models.ts` |
-| Tool execution：工具执行与权限控制 | `src/tools/`、`src/security/` |
-| MCP：连接外部工具服务 | `src/tools/mcp-client.ts` |
-| Context：提示词组装、上下文压缩与项目规则 | `src/context/` |
-| Memory：记忆存储、检索与校验 | `src/memory/` |
-| Guardrails：输入、工具参数、最终输出检查，语义检查、脱敏、审计、Owner 审批与执行准入 | `src/guardrails/` |
-| Tracing：执行轨迹记录与查看 | `src/trace/` |
-| Sessions：会话持久化与恢复 | `src/session/` |
-| Evaluation：护栏基线评估与真实模型冒烟评估 | `evals/` |
+| Model loop: model calls, tool-call loop, retries, and loop detection | `src/agent/`, `src/models.ts` |
+| Tool execution and permission control | `src/tools/`, `src/security/` |
+| MCP connections to external tool servers | `src/tools/mcp-client.ts` |
+| Prompt assembly, context compression, and project rules | `src/context/` |
+| Memory storage, retrieval, and validation | `src/memory/` |
+| Input, tool-argument, and final-output guardrails; semantic checks, redaction, audit, owner approval, and execution gating | `src/guardrails/` |
+| Trace recording and inspection | `src/trace/` |
+| Session persistence and recovery | `src/session/` |
+| Guardrail baseline evaluation and real-model smoke evaluation | `evals/` |
 
-## 本仓库的应用入口
+## Application entry points
 
-Coding Agent 使用上述运行时，组合文件读写、代码检索、终端执行与子 Agent 等工具，支持交互问答、单次任务和只读规划。应用组装入口位于 `src/main.ts`，CLI 入口位于 `src/index.ts`；目前运行时与参考应用仍在同一个包中。
+The coding agent combines these capabilities with file operations, code search, terminal execution, and sub-agents. It supports interactive chat, one-off tasks, and read-only planning. Application wiring lives in `src/main.ts`; the CLI starts in `src/index.ts`. The runtime and reference application remain in the same package here.
 
-## 本地运行（历史应用）
+## Run the historical application locally
 
-安装 Node.js 和 `package.json` 指定版本的 pnpm，然后执行：
+Install Node.js and the pnpm version specified in `package.json`, then run:
 
 ```sh
 pnpm install
@@ -49,25 +51,25 @@ pnpm run init
 pnpm start
 ```
 
-初始化向导生成配置，并提示设置模型凭证。为兼容已有安装，配置文件仍使用 `super-agent.config.json`；会话、记忆等数据路径保持原有配置。
+The setup wizard creates a configuration file and prompts for model credentials. For compatibility with existing installations, the filename remains `super-agent.config.json`; session and memory paths continue to follow the existing configuration.
 
 ```sh
 pnpm start --help
-pnpm start ask "解释这个项目的结构"
-pnpm start plan "分析如何添加一个工具"
+pnpm start ask "Explain the structure of this project"
+pnpm start plan "Analyze how to add a tool"
 pnpm start --continue
 ```
 
-包名和可执行命令均已更名为 `coding-agent`（原命令为 `runframe`）。构建后也可直接执行：
+The package and executable are named `coding-agent`. You can also build and run the CLI directly:
 
 ```sh
 pnpm build
 node dist/index.js --help
 ```
 
-`ask` 和 `plan` 默认只开放只读工具；`plan` 始终只读。交互模式默认询问审批，`--approval-mode always` 会自动批准敏感操作。
+By default, `ask` and `plan` expose only read-only tools; `plan` always remains read-only. Interactive mode asks for approval by default. `--approval-mode always` automatically approves sensitive operations.
 
-## 验证
+## Verification
 
 ```sh
 pnpm typecheck
@@ -75,4 +77,4 @@ pnpm test
 pnpm eval
 ```
 
-`pnpm eval:smoke` 单独运行真实模型评估，需要有效模型配置并会调用外部模型服务。离线测试和评估不代表真实模型或飞书等外部系统已验收。
+`pnpm eval:smoke` separately runs a real-model evaluation. It requires valid model configuration and calls an external model service. Offline tests and evaluations do not establish acceptance with real models or external systems such as Feishu.
